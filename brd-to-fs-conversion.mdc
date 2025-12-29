@@ -1,0 +1,181 @@
+---
+description: Rules for converting Business Requirements Documents (BRD) to Function Specifications (FS)
+alwaysApply: true
+---
+
+# BRD → Function Specification (FS) Conversion Rules
+
+**Important Context**: BRDs are provided by Business teams, not technical teams. They use business terminology and focus on "what" and "why" rather than technical "how". The conversion process must bridge this business-to-technical gap.
+
+When a BRD (Business Requirements Document) is provided instead of FS, convert BRD to FS first.
+
+## Understanding Business-Team BRDs
+
+Business BRDs typically:
+- Use business terminology (not technical jargon)
+- Focus on business objectives and user needs
+- May not specify technical details (data types, APIs, databases)
+- Describe "what" needs to be done, not "how" to implement
+- May include business processes and workflows
+- May reference business systems by business names (not technical names)
+- May have implicit requirements that need interpretation
+
+## BRD Required Sections (Business Perspective)
+
+A complete BRD from Business team should include:
+- Business Objective / Purpose
+- Functional Requirements (what the system should do)
+- User Stories / Use Cases (who needs what)
+- Business Rules (business logic and constraints)
+- Data Requirements (what data is needed, not technical format)
+- Validation Rules (business validation, not technical validation)
+- Error Scenarios (what can go wrong from business perspective)
+- Success Criteria (how business measures success)
+- Non-Functional Requirements (Performance, Security - may be high-level)
+- Dependencies / Integrations (business systems, not technical APIs)
+- Edge Cases / Special Scenarios (business exceptions)
+
+**Note**: Business BRDs may not have all sections in technical detail. The conversion process should interpret and translate business language into technical requirements.
+
+## Conversion Process
+
+1. **Analyze BRD**: 
+   - Review all provided sections
+   - Identify business terminology that needs technical interpretation
+   - Understand business context and objectives
+   - Note implicit requirements that can be inferred
+
+2. **Interpret Business Language**:
+   - Translate business terms to technical equivalents
+   - Infer technical requirements from business requirements
+   - Map business processes to technical workflows
+   - Identify business systems mentioned and map to technical integrations
+
+3. **Check Completeness**: 
+   - If BRD is missing required sections, explicitly list missing sections
+   - Ask clarifying questions in **business-friendly language** (not technical jargon)
+   - For missing technical details, ask: "What should happen when...?" rather than "What API should we use?"
+
+4. **Map BRD to FS**: Use the following mapping:
+   - Business Objective → FS Description
+   - Functional Requirements + User Stories → FS Behavior (step-by-step, interpreted technically)
+   - Data Requirements → FS Inputs and Outputs (infer types from business context)
+   - Validation Rules → FS Inputs.validation (translate business rules to technical validation)
+   - Error Scenarios → FS Errors (translate business errors to technical error codes)
+   - Success Criteria → FS Success (translate business success to technical response)
+   - Edge Cases → FS Edge Cases (translate business exceptions to technical handling)
+   - Dependencies → FS Dependencies (map business systems to technical services/APIs)
+   - Non-Functional Requirements → FS Performance and FS Security (interpret business needs technically)
+   - Business Rules → FS Behavior (incorporate business logic into technical steps)
+
+5. **Make Reasonable Technical Inferences**:
+   - When business says "user enters email", infer: string type, email format validation
+   - When business says "save to database", infer: data persistence requirement
+   - When business says "send notification", infer: notification service integration
+   - When business says "real-time", infer: low latency requirement (< 2 seconds)
+   - When business says "secure", infer: authentication, encryption, authorization
+
+6. **Ask Clarifying Questions (Business-Friendly)**:
+   - Instead of: "What's the database schema?"
+   - Ask: "What information needs to be stored about [entity]?"
+   
+   - Instead of: "What's the API endpoint?"
+   - Ask: "How should the system receive this data?"
+   
+   - Instead of: "What's the error code format?"
+   - Ask: "What message should users see when [error scenario] happens?"
+
+## FS Output Format
+
+Generate FS in this structured format:
+
+```markdown
+# Function Specification: [Function Name]
+
+## Description
+[Clear description from BRD Business Objective, translated to technical context]
+
+## Inputs
+| Field Name | Type | Required | Constraints | Validation Rules |
+|------------|------|----------|-------------|------------------|
+| [field]    | [type]| [yes/no] | [constraints] | [rules] |
+
+## Output
+| Field Name | Type | Description |
+|------------|------|-------------|
+| [field]    | [type]| [description] |
+
+## Behavior
+1. [Step 1 from functional requirements - interpreted technically]
+2. [Step 2 from functional requirements - interpreted technically]
+...
+
+## Errors
+| Error Code | Error Message | Trigger Condition |
+|------------|---------------|-------------------|
+| [code]     | [message]     | [condition]      |
+
+## Success
+- [Success condition 1]
+- [Success condition 2]
+- Response structure: [output structure]
+
+## Edge Cases
+- [Edge case 1]: [Handling approach]
+- [Edge case 2]: [Handling approach]
+
+## Dependencies
+- External Services: [list - mapped from business systems]
+- Databases: [list - inferred from data requirements]
+- Events: [list - inferred from business processes]
+- Other: [list]
+
+## Performance
+- Max Latency: [ms - inferred from "real-time" or business needs]
+- Throughput: [requests/sec - inferred from business volume]
+- Resource Constraints: [if any]
+
+## Security
+- Authentication: [required/optional - inferred from business context]
+- Authorization: [rules - inferred from business access needs]
+- PII Masking: [yes/no - inferred from data sensitivity]
+- Data Encryption: [requirements - inferred from security needs]
+
+## Tests
+- AT-001: [Happy path test description]
+- AT-002: [Error path test description]
+- AT-003: [Edge case test description]
+...
+```
+
+## Important Rules
+
+- **Interpret, Don't Assume**: Translate business language to technical requirements, but don't invent business logic
+- **Business-Friendly Questions**: When asking for missing information, use business language, not technical jargon
+- **Reasonable Inferences**: Make technical inferences from business requirements (e.g., "email" → string type, email validation)
+- **Preserve Business Intent**: Ensure technical FS reflects the business intent, not just technical implementation
+- **If BRD information is ambiguous**: Ask clarifying questions in business terms before generating FS
+- **Do not assume business logic**: Only infer technical implementation details, not business rules
+- **After generating FS**: Present it to user for review and confirmation before proceeding to code generation
+- **Use clear section headers**: Consistent formatting (markdown)
+- **For Inputs/Outputs**: Infer types from business context (e.g., "email" → string, "amount" → number/decimal)
+- **For Behavior**: Break down business processes into numbered, sequential technical steps
+- **For Errors**: Translate business error scenarios to technical error codes and messages
+- **For Tests**: Generate test case IDs (AT-xxx format) covering happy path, error paths, edge cases based on business scenarios
+
+## Example: Business-to-Technical Translation
+
+**Business BRD says**: "User enters their email address and password to create an account"
+
+**Technical FS interprets**:
+- Input: email (string, required, email format validation)
+- Input: password (string, required, minimum 8 characters, complexity rules)
+- Behavior: Validate email format, validate password strength, create user record, send verification email
+- Dependencies: Email service for verification, database for user storage
+
+**Business BRD says**: "System should prevent duplicate registrations"
+
+**Technical FS interprets**:
+- Validation: Check if email already exists in database
+- Error: If duplicate found, return error code `REG-EMAIL-EXISTS` with message "Email already registered"
+- Behavior: Query database before creating new user record
