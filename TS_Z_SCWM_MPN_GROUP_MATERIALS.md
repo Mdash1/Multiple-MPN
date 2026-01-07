@@ -22,10 +22,12 @@ This technical specification details the implementation of function module `Z_SC
 
 ### 1.2 Technical Architecture
 - **Function Type**: Remote-Enabled Function Module (RFC)
+- **Target System**: SAP EWM (Extended Warehouse Management) - Native EWM Implementation
 - **Calling System**: SAP EWM (Extended Warehouse Management)
 - **Integration Point**: Called from `Z_FIORI_SWM_OB_TRK_PRINT_MPN` after material collection, before SmartForm generation
 - **Execution Mode**: Synchronous, single dialog step
 - **Language**: ABAP
+- **EWM Compatibility**: Optimized for EWM 9.0+ and S/4HANA EWM, uses EWM-native data structures and APIs
 
 ### 1.3 Technical Constraints
 - Maximum execution time: < 2 seconds for 100 materials, < 5 seconds for 500 materials
@@ -150,10 +152,10 @@ END OF zscwm_mpn_config_st.
 ```abap
 TYPES: BEGIN OF lty_material_master,
   matnr    TYPE matnr,              " Material number
-  matid    TYPE /sapapo/matid,      " Material GUID (22-byte)
+  matid    TYPE /scwm/de_matid,    " Material GUID (16-byte, EWM native)
   werks    TYPE werks_d,            " Plant code
   spart    TYPE spart,              " Division
-  matkl    TYPE matkl,              " Material group
+  matkl    TYPE matkl,              " Material group (optional)
 END OF lty_material_master.
 
 TYPES: lty_material_master_tt TYPE STANDARD TABLE OF lty_material_master
@@ -482,13 +484,28 @@ ENDFUNCTION.
 
 ### 5.1 Complete Function Module Code (No PERFORM Statements)
 
-**Note**: This code uses inline DATA declarations in LOOP statements (e.g., `LOOP AT ... INTO DATA(ls_structure)`). This syntax is available in:
-- SAP ECC 6.0 EHP7 and later
+**Note**: This code is optimized for SAP EWM (Extended Warehouse Management) landscape. The code uses standard ABAP syntax compatible with:
+- SAP EWM 9.0 and later
+- SAP S/4HANA EWM
 - SAP NetWeaver 7.40 and later
 
-For older ECC systems (ECC 6.0 EHP6 and earlier), replace inline declarations with explicit DATA declarations at the beginning of the relevant code block.
+**EWM-Specific Implementation**:
+- Uses EWM-native data structures (`/SCWM/*` tables and types)
+- Accesses material master data via EWM product information tables
+- No APO dependencies (removed `/SAPAPO/*` references)
+- Compatible with EWM material GUID handling
 
 ```abap
+*"----------------------------------------------------------------------
+*"* EWM-Adapted Implementation
+*"* Key Changes from ECC/APO Version:
+*"* - Removed APO dependencies (/SAPAPO/MARA, /SAPAPO/INC_CONVERT_GUIDS)
+*"* - Uses EWM-native material data from IT_DB_PROCI_O (product information)
+*"* - Reads MARC directly using material numbers (standard SAP, available in EWM)
+*"* - Material GUIDs handled via EWM-native /SCWM/DE_MATID type
+*"* - Optimized for EWM 9.0+ and S/4HANA EWM landscapes
+*"----------------------------------------------------------------------
+
 FUNCTION z_scwm_mpn_group_materials.
 *"----------------------------------------------------------------------
 *"*"Local Interface:
@@ -540,9 +557,7 @@ FUNCTION z_scwm_mpn_group_materials.
         lt_plants TYPE TABLE OF werks_d,
         ls_config_temp TYPE zscwm_mpn_config_st,
         lv_current_date TYPE dats,
-        lt_matid_22 TYPE TABLE OF /sapapo/matid,
         lt_matid_16 TYPE TABLE OF /scwm/de_matid,
-        ls_matid_22 TYPE /sapapo/matid,
         ls_material_master TYPE lty_material_master,
         ls_return TYPE bapiret2,
         lt_criteria TYPE TABLE OF string,
@@ -580,9 +595,7 @@ FUNCTION z_scwm_mpn_group_materials.
         ls_plant TYPE /scwm/t300_md,
         ls_lnumt TYPE /scwm/t300t,
         ls_delv_st TYPE zlog_get_detail_st,
-        ls_mara TYPE /sapapo/mara,
         ls_marc TYPE marc,
-        lt_mara TYPE TABLE OF /sapapo/mara,
         lt_marc TYPE TABLE OF marc,
         lv_matid_16 TYPE /scwm/de_matid,
         lv_criteria TYPE string,
@@ -822,12 +835,25 @@ FUNCTION z_scwm_mpn_group_materials.
   ENDIF.
 
   *----------------------------------------------------------------------*
-  * Step 3: Read Master Data
+  * Step 3: Read Master Data (EWM Native)
   *----------------------------------------------------------------------*
   CLEAR: lt_material_master[].
 
-  * Extract unique material GUIDs
-  CLEAR: lt_matid_16, lt_matid_22.
+  * Extract unique material numbers and GUIDs from input data
+  CLEAR: lt_matid_16, lt_material_numbers.
+  
+  * First, try to get material numbers from IT_DB_PROCI_O (EWM product info)
+  IF it_db_proci_o[] IS NOT INITIAL.
+    LOOP AT it_db_proci_o INTO ls_proci_o.
+      IF ls_proci_o-productno IS NOT INITIAL.
+        APPEND ls_proci_o-productno TO lt_material_numbers.
+      ENDIF.
+    ENDLOOP.
+    SORT lt_material_numbers.
+    DELETE ADJACENT DUPLICATES FROM lt_material_numbers.
+  ENDIF.
+
+  * Also extract material GUIDs from IT_ORDIM_O for mapping
   LOOP AT it_ordim_o INTO ls_ordim_o.
     IF ls_ordim_o-matid IS NOT INITIAL.
       APPEND ls_ordim_o-matid TO lt_matid_16.
@@ -836,44 +862,48 @@ FUNCTION z_scwm_mpn_group_materials.
   SORT lt_matid_16.
   DELETE ADJACENT DUPLICATES FROM lt_matid_16.
 
-  * Convert 16-byte GUIDs to 22-byte GUIDs
-  LOOP AT lt_matid_16 INTO lv_matid_16.
-    CLEAR ls_matid_22.
-    CALL FUNCTION '/SAPAPO/INC_CONVERT_GUIDS'
-      EXPORTING
-        iv_guid16 = lv_matid_16
-      IMPORTING
-        ev_guid22 = ls_matid_22
-      EXCEPTIONS
-        OTHERS    = 1.
-    IF sy-subrc = 0.
-      APPEND ls_matid_22 TO lt_matid_22.
-    ENDIF.
-  ENDLOOP.
-
-  * Read material master data
-  IF lt_matid_22[] IS NOT INITIAL.
-    CLEAR: lt_mara, lt_marc.
-    SELECT matid matnr FROM /sapapo/mara
-      INTO TABLE lt_mara
-      FOR ALL ENTRIES IN lt_matid_22
-      WHERE matid = lt_matid_22-table_line.
+  * Read material master data using material numbers (EWM approach)
+  IF lt_material_numbers[] IS NOT INITIAL.
+    CLEAR: lt_marc.
+    
+    * Read plant and division data from MARC (standard SAP table, available in EWM)
+    SELECT matnr werks spart FROM marc
+      INTO TABLE lt_marc
+      FOR ALL ENTRIES IN lt_material_numbers
+      WHERE matnr = lt_material_numbers-table_line.
 
     IF sy-subrc = 0.
-      * Read plant and division data
-      SELECT matnr werks spart FROM marc
-        INTO TABLE lt_marc
-        FOR ALL ENTRIES IN lt_mara
-        WHERE matnr = lt_mara-matnr.
-
-      * Build material master table
-      LOOP AT lt_mara INTO ls_mara.
+      * Build material master table with GUID mapping
+      LOOP AT lt_material_numbers INTO lv_matnr.
         CLEAR ls_material_master.
-        ls_material_master-matid = ls_mara-matid.
-        ls_material_master-matnr = ls_mara-matnr.
+        ls_material_master-matnr = lv_matnr.
         
+        * Find corresponding GUID from IT_ORDIM_O or IT_DB_PROCI_O
+        LOOP AT it_ordim_o INTO ls_ordim_o.
+          * Try to match via IT_DB_PROCI_O if available
+          IF it_db_proci_o[] IS NOT INITIAL.
+            READ TABLE it_db_proci_o INTO ls_proci_o
+              WITH KEY productno = lv_matnr.
+            IF sy-subrc = 0.
+              READ TABLE it_ordim_o INTO ls_ordim_o
+                WITH KEY rdocid = ls_proci_o-docid.
+              IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
+                ls_material_master-matid = ls_ordim_o-matid.
+                EXIT.
+              ENDIF.
+            ENDIF.
+          ELSE.
+            * Fallback: use first matching GUID (less precise)
+            IF ls_ordim_o-matid IS NOT INITIAL.
+              ls_material_master-matid = ls_ordim_o-matid.
+              EXIT.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+        
+        * Read plant and division from MARC
         READ TABLE lt_marc INTO ls_marc
-          WITH KEY matnr = ls_mara-matnr.
+          WITH KEY matnr = lv_matnr.
         IF sy-subrc = 0.
           ls_material_master-werks = ls_marc-werks.
           ls_material_master-spart = ls_marc-spart.
@@ -884,15 +914,78 @@ FUNCTION z_scwm_mpn_group_materials.
           IF ls_marc-werks IS NOT INITIAL.
             APPEND ls_marc-werks TO lt_plants.
           ENDIF.
+        ELSE.
+          * Try to get plant from IT_DB_PROCI_O if MARC read failed
+          IF it_db_proci_o[] IS NOT INITIAL.
+            READ TABLE it_db_proci_o INTO ls_proci_o
+              WITH KEY productno = lv_matnr.
+            IF sy-subrc = 0 AND ls_proci_o-stock_owner IS NOT INITIAL.
+              ls_material_master-werks = ls_proci_o-stock_owner.
+              APPEND ls_proci_o-stock_owner TO lt_plants.
+            ENDIF.
+          ENDIF.
         ENDIF.
         
         APPEND ls_material_master TO lt_material_master.
       ENDLOOP.
+      
       SORT lt_material_master BY matid.
       SORT lt_divisions.
       DELETE ADJACENT DUPLICATES FROM lt_divisions.
       SORT lt_plants.
       DELETE ADJACENT DUPLICATES FROM lt_plants.
+    ELSE.
+      * If MARC read failed, build from IT_DB_PROCI_O data
+      IF it_db_proci_o[] IS NOT INITIAL.
+        LOOP AT it_db_proci_o INTO ls_proci_o.
+          IF ls_proci_o-productno IS NOT INITIAL.
+            CLEAR ls_material_master.
+            ls_material_master-matnr = ls_proci_o-productno.
+            
+            * Find corresponding GUID
+            LOOP AT it_ordim_o INTO ls_ordim_o.
+              READ TABLE it_db_proci_o TRANSPORTING NO FIELDS
+                WITH KEY docid = ls_ordim_o-rdocid
+                         productno = ls_proci_o-productno.
+              IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
+                ls_material_master-matid = ls_ordim_o-matid.
+                EXIT.
+              ENDIF.
+            ENDLOOP.
+            
+            IF ls_proci_o-stock_owner IS NOT INITIAL.
+              ls_material_master-werks = ls_proci_o-stock_owner.
+              APPEND ls_proci_o-stock_owner TO lt_plants.
+            ENDIF.
+            
+            APPEND ls_material_master TO lt_material_master.
+          ENDIF.
+        ENDLOOP.
+        SORT lt_material_master BY matid.
+        DELETE ADJACENT DUPLICATES FROM lt_material_master.
+        SORT lt_plants.
+        DELETE ADJACENT DUPLICATES FROM lt_plants.
+      ELSE.
+        * Log warning
+        CLEAR ls_return.
+        ls_return-type = 'W'.
+        ls_return-id = 'ZSCWM_MPN'.
+        ls_return-number = '008'.
+        MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+          INTO ls_return-message.
+        APPEND ls_return TO et_return.
+      ENDIF.
+    ENDIF.
+  ELSE.
+    * Fallback: Build material master from GUIDs only (if material numbers not available)
+    IF lt_matid_16[] IS NOT INITIAL.
+      LOOP AT lt_matid_16 INTO lv_matid_16.
+        CLEAR ls_material_master.
+        ls_material_master-matid = lv_matid_16.
+        * Material number will be empty, will be handled in grouping logic
+        APPEND ls_material_master TO lt_material_master.
+      ENDLOOP.
+      SORT lt_material_master BY matid.
     ELSE.
       * Log warning
       CLEAR ls_return.
@@ -1415,12 +1508,19 @@ ENDFUNCTION.
 
 ### 5.2 Code Notes
 
-**Note**: All code is implemented inline within the function module. No FORM routines (PERFORM statements) are used, making the code suitable for SAP ECC systems where inline code is preferred.
+**Note**: All code is implemented inline within the function module. No FORM routines (PERFORM statements) are used, making the code suitable for SAP EWM (Extended Warehouse Management) systems.
+
+**EWM-Specific Adaptations**:
+- Uses EWM-native material master access via `IT_DB_PROCI_O` (product information)
+- Reads plant and division data directly from standard SAP `MARC` table (available in EWM)
+- Removes APO-specific dependencies (`/SAPAPO/MARA`, `/SAPAPO/INC_CONVERT_GUIDS`)
+- Uses material numbers directly from EWM product information tables
+- Handles material GUIDs from EWM order items (`IT_ORDIM_O`)
 
 The function module contains the following logical sections:
 1. **Input Validation**: Validates warehouse, vehicle, and materials table
 2. **Configuration Lookup**: Reads configuration from ZSCWM_MPN_CONFIG table using hierarchy
-3. **Master Data Reading**: Reads material master data (MARA, MARC) for grouping
+3. **Master Data Reading**: Reads material master data using EWM-native approach (from IT_DB_PROCI_O and MARC)
 4. **Grouping Logic**: Applies grouping criteria and creates groups
 5. **Output Building**: Filters all related tables per group and builds output structure
 6. **Default Behavior**: Creates single group if no configuration found
@@ -1430,7 +1530,7 @@ All helper functions (like generate_group_id, calculate_group_summary, log_warni
 
 ---
 
-**Note**: The following FORM routine sections are kept for reference only. The actual implementation in Section 5.1 uses inline code without PERFORM statements, making it suitable for SAP ECC.
+**Note**: The following FORM routine sections are kept for reference only. The actual implementation in Section 5.1 uses inline code without PERFORM statements, optimized for SAP EWM (Extended Warehouse Management) landscape.
 
 #### 5.2.1 VALIDATE_INPUTS (Reference - Now Inline in Section 5.1)
 
@@ -2079,28 +2179,40 @@ SELECT config_id config_level level_value grouping_criteria
 ENDSELECT.
 ```
 
-### 6.2 Material Master Data Access
+### 6.2 Material Master Data Access (EWM Native)
 
-**Pattern**: FOR ALL ENTRIES with multiple table joins
+**Pattern**: Extract material numbers from EWM product information, then read standard SAP tables
 
 **Optimization**:
-- Read MARA first to get material numbers
-- Then read MARC and MVKE using material numbers
+- Extract material numbers directly from `IT_DB_PROCI_O-productno` (EWM product information)
+- Read MARC directly using material numbers (standard SAP table, available in EWM)
+- Map material GUIDs from `IT_ORDIM_O` to material numbers for grouping
 - Cache results in internal tables
 
 **Example**:
 ```abap
-* First: Convert GUIDs and read MARA
-SELECT matid matnr FROM /sapapo/mara
-  INTO TABLE lt_mara
-  FOR ALL ENTRIES IN lt_matid_22
-  WHERE matid = lt_matid_22-table_line.
+* Extract material numbers from EWM product information
+LOOP AT it_db_proci_o INTO ls_proci_o.
+  IF ls_proci_o-productno IS NOT INITIAL.
+    APPEND ls_proci_o-productno TO lt_material_numbers.
+  ENDIF.
+ENDLOOP.
 
-* Then: Read MARC for plant and division
+* Read MARC for plant and division (standard SAP table)
 SELECT matnr werks spart FROM marc
   INTO TABLE lt_marc
-  FOR ALL ENTRIES IN lt_mara
-  WHERE matnr = lt_mara-matnr.
+  FOR ALL ENTRIES IN lt_material_numbers
+  WHERE matnr = lt_material_numbers-table_line.
+
+* Map material GUIDs from order items
+LOOP AT it_ordim_o INTO ls_ordim_o.
+  * Match via IT_DB_PROCI_O to get material number
+  READ TABLE it_db_proci_o INTO ls_proci_o
+    WITH KEY docid = ls_ordim_o-rdocid.
+  IF sy-subrc = 0.
+    * Use productno for material master lookup
+  ENDIF.
+ENDLOOP.
 ```
 
 ### 6.3 Warehouse and Vehicle Validation
@@ -2765,6 +2877,7 @@ ENDFORM.
 | Version | Date | Author | Description |
 |---------|------|--------|------------|
 | 1.0 | 2025-01-XX | [To be filled] | Initial TS creation based on FS |
+| 1.1 | 2025-01-XX | [To be filled] | EWM Adaptation: Removed APO dependencies, optimized for EWM-native material master access |
 
 ---
 
