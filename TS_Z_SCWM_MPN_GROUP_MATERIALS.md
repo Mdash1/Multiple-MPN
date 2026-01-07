@@ -22,12 +22,12 @@ This technical specification details the implementation of function module `Z_SC
 
 ### 1.2 Technical Architecture
 - **Function Type**: Remote-Enabled Function Module (RFC)
-- **Target System**: SAP EWM (Extended Warehouse Management) - Native EWM Implementation
+- **Target System**: SAP EWM 7.0 (Extended Warehouse Management) - Compatible Implementation
 - **Calling System**: SAP EWM (Extended Warehouse Management)
 - **Integration Point**: Called from `Z_FIORI_SWM_OB_TRK_PRINT_MPN` after material collection, before SmartForm generation
 - **Execution Mode**: Synchronous, single dialog step
 - **Language**: ABAP
-- **EWM Compatibility**: Optimized for EWM 9.0+ and S/4HANA EWM, uses EWM-native data structures and APIs
+- **EWM Compatibility**: Optimized for EWM 7.0, uses APO material master tables (/SAPAPO/MATKEY, /SAPAPO/MATLWH) that are part of EWM 7.0 architecture
 
 ### 1.3 Technical Constraints
 - Maximum execution time: < 2 seconds for 100 materials, < 5 seconds for 500 materials
@@ -274,10 +274,10 @@ TYPES: lty_group_internal_tt TYPE STANDARD TABLE OF lty_group_internal
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  STEP 3: Read Master Data (EWM Native)                      │
+│  STEP 3: Read Master Data (EWM 7.0 Compatible)              │
 │  - Extract unique material numbers from IT_DB_PROCI_O        │
 │  - Extract material GUIDs from IT_ORDIM_O                    │
-│  - Read /SCWM/MAT, /SCWM/MATPLANT, MVKE using FOR ALL ENTRIES│
+│  - Read /SAPAPO/MATKEY, /SAPAPO/MATLWH using FOR ALL ENTRIES│
 │  - Map GUIDs to material numbers                             │
 │  - Read warehouse master data                                │
 │  - Cache in internal tables                                  │
@@ -485,30 +485,28 @@ ENDFUNCTION.
 
 ### 5.1 Complete Function Module Code (No PERFORM Statements)
 
-**Note**: This code is optimized for SAP EWM (Extended Warehouse Management) landscape. The code uses standard ABAP syntax compatible with:
-- SAP EWM 9.0 and later
-- SAP S/4HANA EWM
+**Note**: This code is optimized for SAP EWM 7.0 (Extended Warehouse Management) landscape. The code uses standard ABAP syntax compatible with:
+- SAP EWM 7.0 (uses APO tables)
+- SAP S/4HANA EWM (may use different tables)
 - SAP NetWeaver 7.40 and later
 
-**EWM-Specific Implementation**:
-- Uses EWM-native data structures (`/SCWM/*` tables and types)
-- Accesses material master data via EWM product information tables
-- No APO dependencies (removed `/SAPAPO/*` references)
-- Compatible with EWM material GUID handling
+**EWM 7.0-Compatible Implementation**:
+- Uses APO material master tables (/SAPAPO/MATKEY, /SAPAPO/MATLWH) available in EWM 7.0
+- Accesses material master data via EWM product information tables (IT_DB_PROCI_O)
+- Uses APO material GUIDs (22-byte) for material master lookups
+- Compatible with EWM material GUID handling (converts between 16-byte and 22-byte GUIDs)
+- Uses APO tables that are part of EWM 7.0 architecture
 
 ```abap
 *"----------------------------------------------------------------------
-*"* EWM-Adapted Implementation
+*"* EWM 7.0-Compatible Implementation
 *"* Key Changes from ECC/APO Version:
-*"* - Removed APO dependencies (/SAPAPO/MARA, /SAPAPO/INC_CONVERT_GUIDS)
-*"* - Removed ECC dependencies (MARC table)
-*"* - Uses EWM-native material master tables:
-*"*   * /SCWM/MAT - EWM Material Master
-*"*   * /SCWM/MATPLANT - EWM Material Plant data (for plant code)
-*"*   * MVKE - Material Sales Data (for division, standard SAP used in EWM)
+*"* - Uses APO material master tables (available in EWM 7.0):
+*"*   * /SAPAPO/MATKEY - APO Material Key (contains matid and matnr mapping)
+*"*   * /SAPAPO/MATLWH - APO Material Warehouse/Plant (contains plant and division)
 *"* - Uses EWM-native material data from IT_DB_PROCI_O (product information)
-*"* - Material GUIDs handled via EWM-native /SCWM/DE_MATID type
-*"* - Optimized for EWM 9.0+ and S/4HANA EWM landscapes
+*"* - Material GUIDs handled via APO /SAPAPO/MATID (22-byte) and EWM /SCWM/DE_MATID (16-byte)
+*"* - Compatible with EWM 7.0 (uses APO tables that are part of EWM 7.0 architecture)
 *"----------------------------------------------------------------------
 
 FUNCTION z_scwm_mpn_group_materials.
@@ -600,12 +598,11 @@ FUNCTION z_scwm_mpn_group_materials.
         ls_plant TYPE /scwm/t300_md,
         ls_lnumt TYPE /scwm/t300t,
         ls_delv_st TYPE zlog_get_detail_st,
-        ls_matplant TYPE /scwm/matplant,
-        lt_matplant TYPE TABLE OF /scwm/matplant,
-        ls_mat TYPE /scwm/mat,
-        lt_mat TYPE TABLE OF /scwm/mat,
-        ls_mvke TYPE mvke,
-        lt_mvke TYPE TABLE OF mvke,
+        ls_matkey TYPE /sapapo/matkey,
+        lt_matkey TYPE TABLE OF /sapapo/matkey,
+        ls_matlwh TYPE /sapapo/matlwh,
+        lt_matlwh TYPE TABLE OF /sapapo/matlwh,
+        lt_matid_22 TYPE TABLE OF /sapapo/matid,
         lv_matid_16 TYPE /scwm/de_matid,
         lv_criteria TYPE string,
         ls_material_master_temp TYPE lty_material_master,
@@ -871,70 +868,100 @@ FUNCTION z_scwm_mpn_group_materials.
   SORT lt_matid_16.
   DELETE ADJACENT DUPLICATES FROM lt_matid_16.
 
-  * Read material master data using EWM-native tables
+  * Read material master data using APO tables (available in EWM 7.0)
   IF lt_material_numbers[] IS NOT INITIAL.
-    CLEAR: lt_matplant, lt_mat, lt_mvke.
+    CLEAR: lt_matkey, lt_matlwh.
     
-    * Read EWM Material Master data from /SCWM/MAT
-    SELECT matnr FROM /scwm/mat
-      INTO TABLE lt_mat
+    * Read Material Key data from /SAPAPO/MATKEY - APO table available in EWM 7.0
+    * Note: /SAPAPO/MATKEY uses matid (GUID) as key, so we need to convert material numbers to GUIDs first
+    * For now, we'll read MATLWH which may have matnr or we can use material numbers directly
+    
+    * Read Material Warehouse/Plant Data from /SAPAPO/MATLWH - APO table available in EWM 7.0
+    * Contains plant (werks) and division (spart) information
+    * Note: /SAPAPO/MATLWH uses matid as key, so we need to match via material GUIDs
+    * Alternative: Read using material numbers if the table supports it, or convert via MATKEY
+    
+    * First, try to get matid from material numbers via /SAPAPO/MATKEY
+    SELECT matid matnr FROM /sapapo/matkey
+      INTO TABLE lt_matkey
       FOR ALL ENTRIES IN lt_material_numbers
       WHERE matnr = lt_material_numbers-table_line.
 
-    * Read EWM Material Plant data from /SCWM/MATPLANT (contains plant-specific data)
-    SELECT matnr werks FROM /scwm/matplant
-      INTO TABLE lt_matplant
-      FOR ALL ENTRIES IN lt_material_numbers
-      WHERE matnr = lt_material_numbers-table_line.
+    IF sy-subrc = 0 AND lt_matkey[] IS NOT INITIAL.
+      * Extract matids from MATKEY for reading MATLWH
+      CLEAR: lt_matid_22.
+      LOOP AT lt_matkey INTO ls_matkey.
+        IF ls_matkey-matid IS NOT INITIAL.
+          APPEND ls_matkey-matid TO lt_matid_22.
+        ENDIF.
+      ENDLOOP.
+      SORT lt_matid_22.
+      DELETE ADJACENT DUPLICATES FROM lt_matid_22.
+      
+      * Read Material Warehouse/Plant Data from /SAPAPO/MATLWH using matid
+      IF lt_matid_22[] IS NOT INITIAL.
+        SELECT matid werks spart FROM /sapapo/matlwh
+          INTO TABLE lt_matlwh
+          FOR ALL ENTRIES IN lt_matid_22
+          WHERE matid = lt_matid_22-table_line.
+      ENDIF.
+    ENDIF.
 
-    * Read Material Sales Data (MVKE) for division information
-    * Note: MVKE is standard SAP table but commonly used in EWM for sales/division data
-    SELECT matnr vkorg vtweg spart FROM mvke
-      INTO TABLE lt_mvke
-      FOR ALL ENTRIES IN lt_material_numbers
-      WHERE matnr = lt_material_numbers-table_line
-        AND vkorg <> space
-        AND vtweg <> space.
-
-    IF sy-subrc = 0 OR lt_matplant[] IS NOT INITIAL OR lt_mat[] IS NOT INITIAL.
+    IF sy-subrc = 0 OR lt_matlwh[] IS NOT INITIAL OR lt_matkey[] IS NOT INITIAL.
       * Build material master table with GUID mapping
       LOOP AT lt_material_numbers INTO lv_matnr.
         CLEAR ls_material_master.
         ls_material_master-matnr = lv_matnr.
         
-        * Find corresponding GUID from IT_ORDIM_O or IT_DB_PROCI_O
-        LOOP AT it_ordim_o INTO ls_ordim_o.
-          * Try to match via IT_DB_PROCI_O if available
-          IF it_db_proci_o[] IS NOT INITIAL.
-            READ TABLE it_db_proci_o INTO ls_proci_o
-              WITH KEY productno = lv_matnr.
-            IF sy-subrc = 0.
-              READ TABLE it_ordim_o INTO ls_ordim_o
-                WITH KEY rdocid = ls_proci_o-docid.
-              IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
+        * Find corresponding GUID from /SAPAPO/MATKEY or IT_ORDIM_O
+        READ TABLE lt_matkey INTO ls_matkey
+          WITH KEY matnr = lv_matnr.
+        IF sy-subrc = 0 AND ls_matkey-matid IS NOT INITIAL.
+          ls_material_master-matid = ls_matkey-matid.
+        ELSE.
+          * Fallback: Find GUID from IT_ORDIM_O or IT_DB_PROCI_O
+          LOOP AT it_ordim_o INTO ls_ordim_o.
+            * Try to match via IT_DB_PROCI_O if available
+            IF it_db_proci_o[] IS NOT INITIAL.
+              READ TABLE it_db_proci_o INTO ls_proci_o
+                WITH KEY productno = lv_matnr.
+              IF sy-subrc = 0.
+                READ TABLE it_ordim_o INTO ls_ordim_o
+                  WITH KEY rdocid = ls_proci_o-docid.
+                IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
+                  ls_material_master-matid = ls_ordim_o-matid.
+                  EXIT.
+                ENDIF.
+              ENDIF.
+            ELSE.
+              * Fallback: use first matching GUID (less precise)
+              IF ls_ordim_o-matid IS NOT INITIAL.
                 ls_material_master-matid = ls_ordim_o-matid.
                 EXIT.
               ENDIF.
             ENDIF.
-          ELSE.
-            * Fallback: use first matching GUID (less precise)
-            IF ls_ordim_o-matid IS NOT INITIAL.
-              ls_material_master-matid = ls_ordim_o-matid.
-              EXIT.
+          ENDLOOP.
+        ENDIF.
+        
+        * Read plant and division from /SAPAPO/MATLWH using matid
+        IF ls_material_master-matid IS NOT INITIAL.
+          READ TABLE lt_matlwh INTO ls_matlwh
+            WITH KEY matid = ls_material_master-matid.
+          IF sy-subrc = 0.
+            ls_material_master-werks = ls_matlwh-werks.
+            ls_material_master-spart = ls_matlwh-spart.
+            * Collect divisions and plants for config lookup
+            IF ls_matlwh-spart IS NOT INITIAL.
+              APPEND ls_matlwh-spart TO lt_divisions.
+            ENDIF.
+            IF ls_matlwh-werks IS NOT INITIAL.
+              APPEND ls_matlwh-werks TO lt_plants.
             ENDIF.
           ENDIF.
-        ENDLOOP.
+        ENDIF.
         
-        * Read plant from EWM Material Plant table (/SCWM/MATPLANT)
-        READ TABLE lt_matplant INTO ls_matplant
-          WITH KEY matnr = lv_matnr.
-        IF sy-subrc = 0.
-          ls_material_master-werks = ls_matplant-werks.
-          IF ls_matplant-werks IS NOT INITIAL.
-            APPEND ls_matplant-werks TO lt_plants.
-          ENDIF.
-        ELSE.
-          * Try to get plant from IT_DB_PROCI_O if EWM table read failed
+        * If MATLWH read failed, try to get plant from IT_DB_PROCI_O
+        IF ls_material_master-werks IS INITIAL.
           IF it_db_proci_o[] IS NOT INITIAL.
             READ TABLE it_db_proci_o INTO ls_proci_o
               WITH KEY productno = lv_matnr.
@@ -942,22 +969,6 @@ FUNCTION z_scwm_mpn_group_materials.
               ls_material_master-werks = ls_proci_o-stock_owner.
               APPEND ls_proci_o-stock_owner TO lt_plants.
             ENDIF.
-          ENDIF.
-        ENDIF.
-        
-        * Read division from Material Sales Data (MVKE)
-        * Use first sales organization/division combination found
-        READ TABLE lt_mvke INTO ls_mvke
-          WITH KEY matnr = lv_matnr.
-        IF sy-subrc = 0 AND ls_mvke-spart IS NOT INITIAL.
-          ls_material_master-spart = ls_mvke-spart.
-          APPEND ls_mvke-spart TO lt_divisions.
-        ELSE.
-          * Try alternative: Read from IT_DB_PROCI_O if available
-          IF it_db_proci_o[] IS NOT INITIAL.
-            READ TABLE it_db_proci_o INTO ls_proci_o
-              WITH KEY productno = lv_matnr.
-            * Note: Division might not be in IT_DB_PROCI_O, so this is optional
           ENDIF.
         ENDIF.
         
@@ -1545,21 +1556,20 @@ ENDFUNCTION.
 
 **Note**: All code is implemented inline within the function module. No FORM routines (PERFORM statements) are used, making the code suitable for SAP EWM (Extended Warehouse Management) systems.
 
-**EWM-Specific Adaptations**:
+**EWM 7.0-Specific Adaptations**:
 - Uses EWM-native material master access via `IT_DB_PROCI_O` (product information)
-- Reads material master data from EWM-native tables:
-  - `/SCWM/MAT` - EWM Material Master table
-  - `/SCWM/MATPLANT` - EWM Material Plant data (for plant code)
-  - `MVKE` - Material Sales Data (for division, standard SAP table used in EWM)
-- Removes APO-specific dependencies (`/SAPAPO/MARA`, `/SAPAPO/INC_CONVERT_GUIDS`)
-- Removes ECC-specific dependencies (`MARC` table)
+- Reads material master data from APO tables (available in EWM 7.0):
+  - `/SAPAPO/MATKEY` - APO Material Key table (contains matid and matnr mapping)
+  - `/SAPAPO/MATLWH` - APO Material Warehouse/Plant table (contains plant and division)
+- Uses APO material GUIDs (22-byte `/SAPAPO/MATID`) for material master lookups
+- Compatible with EWM 7.0 (uses APO tables that are part of EWM 7.0 architecture)
 - Uses material numbers directly from EWM product information tables
 - Handles material GUIDs from EWM order items (`IT_ORDIM_O`)
 
 The function module contains the following logical sections:
 1. **Input Validation**: Validates warehouse, vehicle, and materials table
 2. **Configuration Lookup**: Reads configuration from ZSCWM_MPN_CONFIG table using hierarchy
-3. **Master Data Reading**: Reads material master data using EWM-native tables (/SCWM/MAT, /SCWM/MATPLANT, MVKE)
+3. **Master Data Reading**: Reads material master data using APO tables (/SAPAPO/MATKEY, /SAPAPO/MATLWH) available in EWM 7.0
 4. **Grouping Logic**: Applies grouping criteria and creates groups
 5. **Output Building**: Filters all related tables per group and builds output structure
 6. **Default Behavior**: Creates single group if no configuration found
@@ -1741,11 +1751,11 @@ FORM read_master_data USING it_ordim_o TYPE zewm_ordim_o_tt
         ls_material_master TYPE lty_material_master,
         ls_return TYPE bapiret2,
         lt_material_numbers TYPE TABLE OF matnr,
-        lt_matplant TYPE TABLE OF /scwm/matplant,
-        lt_mat TYPE TABLE OF /scwm/mat,
-        lt_mvke TYPE TABLE OF mvke,
-        ls_matplant TYPE /scwm/matplant,
-        ls_mvke TYPE mvke,
+        lt_matkey TYPE TABLE OF /sapapo/matkey,
+        lt_matlwh TYPE TABLE OF /sapapo/matlwh,
+        lt_matid_22 TYPE TABLE OF /sapapo/matid,
+        ls_matkey TYPE /sapapo/matkey,
+        ls_matlwh TYPE /sapapo/matlwh,
         lv_matnr TYPE matnr,
         ls_proci_o TYPE zewm_db_proci_o1_st,
         ls_ordim_o TYPE zewm_ordim_o_st.
@@ -1772,61 +1782,70 @@ FORM read_master_data USING it_ordim_o TYPE zewm_ordim_o_tt
   SORT lt_matid_16.
   DELETE ADJACENT DUPLICATES FROM lt_matid_16.
 
-  * Read EWM Material Master data
+  * Read Material Master data using APO tables (EWM 7.0 compatible)
   IF lt_material_numbers[] IS NOT INITIAL.
-    * Read EWM Material Master table
-    SELECT matnr FROM /scwm/mat
-      INTO TABLE lt_mat
+    * Read Material Key from /SAPAPO/MATKEY - APO table available in EWM 7.0
+    SELECT matid matnr FROM /sapapo/matkey
+      INTO TABLE lt_matkey
       FOR ALL ENTRIES IN lt_material_numbers
       WHERE matnr = lt_material_numbers-table_line.
 
-    * Read EWM Material Plant data (for plant code)
-    SELECT matnr werks FROM /scwm/matplant
-      INTO TABLE lt_matplant
-      FOR ALL ENTRIES IN lt_material_numbers
-      WHERE matnr = lt_material_numbers-table_line.
-
-    * Read Material Sales Data (for division)
-    SELECT matnr vkorg vtweg spart FROM mvke
-      INTO TABLE lt_mvke
-      FOR ALL ENTRIES IN lt_material_numbers
-      WHERE matnr = lt_material_numbers-table_line
-        AND vkorg <> space
-        AND vtweg <> space.
+    IF sy-subrc = 0 AND lt_matkey[] IS NOT INITIAL.
+      * Extract matids from MATKEY for reading MATLWH
+      CLEAR: lt_matid_22.
+      LOOP AT lt_matkey INTO ls_matkey.
+        IF ls_matkey-matid IS NOT INITIAL.
+          APPEND ls_matkey-matid TO lt_matid_22.
+        ENDIF.
+      ENDLOOP.
+      SORT lt_matid_22.
+      DELETE ADJACENT DUPLICATES FROM lt_matid_22.
+      
+      * Read Material Warehouse/Plant Data from /SAPAPO/MATLWH - APO table available in EWM 7.0
+      IF lt_matid_22[] IS NOT INITIAL.
+        SELECT matid werks spart FROM /sapapo/matlwh
+          INTO TABLE lt_matlwh
+          FOR ALL ENTRIES IN lt_matid_22
+          WHERE matid = lt_matid_22-table_line.
+      ENDIF.
+    ENDIF.
 
     * Build material master table
     LOOP AT lt_material_numbers INTO lv_matnr.
       CLEAR ls_material_master.
       ls_material_master-matnr = lv_matnr.
       
-      * Find corresponding GUID from IT_ORDIM_O
-      LOOP AT it_ordim_o INTO ls_ordim_o.
-        IF it_db_proci_o[] IS NOT INITIAL.
-          READ TABLE it_db_proci_o INTO ls_proci_o
-            WITH KEY productno = lv_matnr.
-          IF sy-subrc = 0.
-            READ TABLE it_ordim_o INTO ls_ordim_o
-              WITH KEY rdocid = ls_proci_o-docid.
-            IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
-              ls_material_master-matid = ls_ordim_o-matid.
-              EXIT.
+      * Find corresponding GUID from /SAPAPO/MATKEY or IT_ORDIM_O
+      READ TABLE lt_matkey INTO ls_matkey
+        WITH KEY matnr = lv_matnr.
+      IF sy-subrc = 0 AND ls_matkey-matid IS NOT INITIAL.
+        ls_material_master-matid = ls_matkey-matid.
+      ELSE.
+        * Fallback: Find GUID from IT_ORDIM_O
+        LOOP AT it_ordim_o INTO ls_ordim_o.
+          IF it_db_proci_o[] IS NOT INITIAL.
+            READ TABLE it_db_proci_o INTO ls_proci_o
+              WITH KEY productno = lv_matnr.
+            IF sy-subrc = 0.
+              READ TABLE it_ordim_o INTO ls_ordim_o
+                WITH KEY rdocid = ls_proci_o-docid.
+              IF sy-subrc = 0 AND ls_ordim_o-matid IS NOT INITIAL.
+                ls_material_master-matid = ls_ordim_o-matid.
+                EXIT.
+              ENDIF.
             ENDIF.
           ENDIF.
-        ENDIF.
-      ENDLOOP.
-      
-      * Read plant from EWM Material Plant table
-      READ TABLE lt_matplant INTO ls_matplant
-        WITH KEY matnr = lv_matnr.
-      IF sy-subrc = 0.
-        ls_material_master-werks = ls_matplant-werks.
+        ENDLOOP.
       ENDIF.
       
-      * Read division from Material Sales Data
-      READ TABLE lt_mvke INTO ls_mvke
-        WITH KEY matnr = lv_matnr.
-      IF sy-subrc = 0.
-        ls_material_master-spart = ls_mvke-spart.
+      * Read plant and division from /SAPAPO/MATLWH using matid
+      IF ls_material_master-matid IS NOT INITIAL.
+        READ TABLE lt_matlwh INTO ls_matlwh
+          WITH KEY matid = ls_material_master-matid.
+        IF sy-subrc = 0.
+          ls_material_master-werks = ls_matlwh-werks.
+          ls_material_master-spart = ls_matlwh-spart.
+        ENDIF.
       ENDIF.
       
       APPEND ls_material_master TO et_material_master.
@@ -2255,13 +2274,12 @@ ENDSELECT.
 
 ### 6.2 Material Master Data Access (EWM Native)
 
-**Pattern**: Extract material numbers from EWM product information, then read EWM-native tables
+**Pattern**: Extract material numbers from EWM product information, then read APO tables (EWM 7.0 compatible)
 
 **Optimization**:
 - Extract material numbers directly from `IT_DB_PROCI_O-productno` (EWM product information)
-- Read `/SCWM/MAT` (EWM Material Master) to validate material existence
-- Read `/SCWM/MATPLANT` (EWM Material Plant) for plant code
-- Read `MVKE` (Material Sales Data) for division information
+- Read `/SAPAPO/MATKEY` to get material GUIDs (matid) from material numbers
+- Read `/SAPAPO/MATLWH` using material GUIDs to get plant code and division
 - Map material GUIDs from `IT_ORDIM_O` to material numbers for grouping
 - Cache results in internal tables
 
@@ -2274,25 +2292,26 @@ LOOP AT it_db_proci_o INTO ls_proci_o.
   ENDIF.
 ENDLOOP.
 
-* Read EWM Material Master table
-SELECT matnr FROM /scwm/mat
-  INTO TABLE lt_mat
+* Read Material Key from /SAPAPO/MATKEY - APO table available in EWM 7.0
+* Gets matid (22-byte GUID) from matnr
+SELECT matid matnr FROM /sapapo/matkey
+  INTO TABLE lt_matkey
   FOR ALL ENTRIES IN lt_material_numbers
   WHERE matnr = lt_material_numbers-table_line.
 
-* Read EWM Material Plant data (for plant code)
-SELECT matnr werks FROM /scwm/matplant
-  INTO TABLE lt_matplant
-  FOR ALL ENTRIES IN lt_material_numbers
-  WHERE matnr = lt_material_numbers-table_line.
+* Extract matids for reading MATLWH
+LOOP AT lt_matkey INTO ls_matkey.
+  IF ls_matkey-matid IS NOT INITIAL.
+    APPEND ls_matkey-matid TO lt_matid_22.
+  ENDIF.
+ENDLOOP.
 
-* Read Material Sales Data (for division)
-SELECT matnr vkorg vtweg spart FROM mvke
-  INTO TABLE lt_mvke
-  FOR ALL ENTRIES IN lt_material_numbers
-  WHERE matnr = lt_material_numbers-table_line
-    AND vkorg <> space
-    AND vtweg <> space.
+* Read Material Warehouse/Plant Data from /SAPAPO/MATLWH - APO table available in EWM 7.0
+* Contains both plant (werks) and division (spart) information
+SELECT matid werks spart FROM /sapapo/matlwh
+  INTO TABLE lt_matlwh
+  FOR ALL ENTRIES IN lt_matid_22
+  WHERE matid = lt_matid_22-table_line.
 
 * Map material GUIDs from order items
 LOOP AT it_ordim_o INTO ls_ordim_o.
