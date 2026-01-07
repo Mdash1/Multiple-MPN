@@ -89,7 +89,17 @@ TYPES: BEGIN OF zscwm_mpn_group_st,
   group_criteria_value TYPE char200,            " Grouping criteria value
   group_criteria_desc  TYPE char200,            " Grouping criteria description
   it_ordim_o          TYPE zewm_ordim_o_tt,    " Materials in group
-  it_db_proci_o       TYPE zewm_db_proci_o1_tt, " Product info for group
+  it_db_proci_o       TYPE zewm_db_proci_o1_tt, " Product info for group (filtered)
+  it_db_proch_o       TYPE zewm_db_proch_o_tt,  " Product header info (filtered)
+  it_db_refdoc        TYPE zewm_db_ref_doc_tt,  " Reference documents (filtered)
+  it_it_waveitm       TYPE zewm_waveitm_tt,     " Wave items (filtered)
+  it_but000           TYPE zewm_but000_tt,      " Business partners (filtered)
+  it_but020           TYPE zewm_but020_tt,      " Address assignments (filtered)
+  it_adrc             TYPE zewm_adrc_tt,        " Address data (filtered)
+  it_t005u            TYPE t005u_t,            " Region descriptions (filtered)
+  it_plant            TYPE /scwm/t300_md_tt,   " Plant data (filtered)
+  it_lnumt            TYPE /scwm/t300t_tt,     " Warehouse descriptions (filtered)
+  it_delv_st          TYPE zlog_get_detail_tt, " Delivery details (filtered)
   group_summary       TYPE zscwm_mpn_group_summary_st, " Group summary
 END OF zscwm_mpn_group_st.
 ```
@@ -173,6 +183,7 @@ TYPES: BEGIN OF lty_group_internal,
   group_index      TYPE i,                       " Internal index
   materials        TYPE zewm_ordim_o_tt,         " Materials in group
   product_info     TYPE zewm_db_proci_o1_tt,     " Product info
+  docids           TYPE /scwm/tt_rdocid,          " Document IDs for filtering
 END OF lty_group_internal.
 
 TYPES: lty_group_internal_tt TYPE STANDARD TABLE OF lty_group_internal
@@ -192,6 +203,16 @@ TYPES: lty_group_internal_tt TYPE STANDARD TABLE OF lty_group_internal
 | IV_REPORT_NO | `YREPORT_NO` | Value | Yes | Report number / Vehicle external number |
 | IT_ORDIM_O | `ZEWM_ORDIM_O_TT` | Value | Yes | Order items table |
 | IT_DB_PROCI_O | `ZEWM_DB_PROCI_O1_TT` | Value | No | Product information table |
+| IT_DB_PROCH_O | `ZEWM_DB_PROCH_O_TT` | Value | No | Product header information table |
+| IT_DB_REFDOC | `ZEWM_DB_REF_DOC_TT` | Value | No | Reference document table |
+| IT_IT_WAVEITM | `ZEWM_WAVEITM_TT` | Value | No | Wave item table |
+| IT_BUT000 | `ZEWM_BUT000_TT` | Value | No | Business partner general data |
+| IT_BUT020 | `ZEWM_BUT020_TT` | Value | No | Business partner address assignment |
+| IT_ADRC | `ZEWM_ADRC_TT` | Value | No | Address data |
+| IT_T005U | `T005U_TT` | Value | No | Region/State descriptions |
+| IT_PLANT | `/SCWM/T300_MD_TT` | Value | No | Warehouse plant data |
+| IT_LNUMT | `/SCWM/T300T_TT` | Value | No | Warehouse descriptions |
+| IT_DELV_ST | `ZLOG_GET_DETAIL_TT` | Value | No | Delivery detail data |
 | IV_DISPATCH_DATE | `SYDATUM` | Value | No | Dispatch date (default: SY-DATUM) |
 | IV_USE_CONFIG | `ABAP_BOOL` | Value | No | Use configuration flag (default: 'X') |
 
@@ -199,11 +220,11 @@ TYPES: lty_group_internal_tt TYPE STANDARD TABLE OF lty_group_internal
 
 | Parameter | Type | Pass Value | Description |
 |-----------|------|------------|-------------|
-| ET_GROUPED_MATERIALS | `ZSCWM_MPN_GROUP_TT` | Value | Grouped materials table |
-| EV_GROUP_COUNT | `I` | Value | Number of groups created |
+| ET_GROUPED_MATERIALS | `ZSCWM_MPN_GROUP_TT` | Value | Grouped materials table (one entry per MPN group, contains all filtered data for SmartForm) |
+| EV_GROUP_COUNT | `I` | Value | Number of groups created (**Multiple Print Indicator**: If > 1, multiple MPNs need to be generated) |
 | EV_CONFIG_ID | `CHAR32` | Value | Configuration ID applied |
-| EV_CONFIG_LEVEL | `CHAR10` | Value | Configuration level applied |
-| EV_GROUPING_CRITERIA | `CHAR200` | Value | Grouping criteria applied |
+| EV_CONFIG_LEVEL | `CHAR10` | Value | Configuration level applied (GLOBAL, SITE, PLANT, DIVISION, MATERIAL) |
+| EV_GROUPING_CRITERIA | `CHAR200` | Value | Grouping criteria applied (comma-separated: WH, M, PC, D) |
 
 ### 3.3 Table Parameters
 
@@ -278,7 +299,16 @@ TYPES: lty_group_internal_tt TYPE STANDARD TABLE OF lty_group_internal
 │  - Loop through groups:                                       │
 │    * Generate GROUP_ID                                       │
 │    * Calculate GROUP_SUMMARY                                 │
-│    * Filter IT_DB_PROCI_O for group                          │
+│    * Extract document IDs from group materials               │
+│    * Filter all related tables for group:                   │
+│      - IT_DB_PROCI_O (by docid)                             │
+│      - IT_DB_PROCH_O (by docno from proci_o)                │
+│      - IT_DB_REFDOC (by docid)                              │
+│      - IT_IT_WAVEITM (by rdocid)                            │
+│      - IT_BUT000, IT_BUT020, IT_ADRC, IT_T005U              │
+│        (by partner/address from proch_o)                    │
+│      - IT_PLANT, IT_LNUMT (by lgnum from materials)         │
+│      - IT_DELV_ST (by deliveryno from refdoc)              │
 │    * Append to ET_GROUPED_MATERIALS                          │
 │  - Set EV_GROUP_COUNT                                        │
 └──────────────────────┬──────────────────────────────────────┘
@@ -450,7 +480,13 @@ ENDFUNCTION.
 
 ## 5. Code Structure
 
-### 5.1 Function Module Skeleton
+### 5.1 Complete Function Module Code (No PERFORM Statements)
+
+**Note**: This code uses inline DATA declarations in LOOP statements (e.g., `LOOP AT ... INTO DATA(ls_structure)`). This syntax is available in:
+- SAP ECC 6.0 EHP7 and later
+- SAP NetWeaver 7.40 and later
+
+For older ECC systems (ECC 6.0 EHP6 and earlier), replace inline declarations with explicit DATA declarations at the beginning of the relevant code block.
 
 ```abap
 FUNCTION z_scwm_mpn_group_materials.
@@ -462,6 +498,16 @@ FUNCTION z_scwm_mpn_group_materials.
 *"     VALUE(IV_REPORT_NO) TYPE YREPORT_NO
 *"     VALUE(IT_ORDIM_O) TYPE ZEWM_ORDIM_O_TT
 *"     VALUE(IT_DB_PROCI_O) TYPE ZEWM_DB_PROCI_O1_TT OPTIONAL
+*"     VALUE(IT_DB_PROCH_O) TYPE ZEWM_DB_PROCH_O_TT OPTIONAL
+*"     VALUE(IT_DB_REFDOC) TYPE ZEWM_DB_REF_DOC_TT OPTIONAL
+*"     VALUE(IT_IT_WAVEITM) TYPE ZEWM_WAVEITM_TT OPTIONAL
+*"     VALUE(IT_BUT000) TYPE ZEWM_BUT000_TT OPTIONAL
+*"     VALUE(IT_BUT020) TYPE ZEWM_BUT020_TT OPTIONAL
+*"     VALUE(IT_ADRC) TYPE ZEWM_ADRC_TT OPTIONAL
+*"     VALUE(IT_T005U) TYPE T005U_T OPTIONAL
+*"     VALUE(IT_PLANT) TYPE /SCWM/T300_MD_TT OPTIONAL
+*"     VALUE(IT_LNUMT) TYPE /SCWM/T300T_TT OPTIONAL
+*"     VALUE(IT_DELV_ST) TYPE ZLOG_GET_DETAIL_TT OPTIONAL
 *"     VALUE(IV_DISPATCH_DATE) TYPE SYDATUM OPTIONAL
 *"     VALUE(IV_USE_CONFIG) TYPE ABAP_BOOL DEFAULT 'X'
 *"  EXPORTING
@@ -476,13 +522,79 @@ FUNCTION z_scwm_mpn_group_materials.
 *"     OTHERS
 *"----------------------------------------------------------------------
 
+  *----------------------------------------------------------------------*
+  * Local Data Declarations
+  *----------------------------------------------------------------------*
   DATA: lv_dispatch_date TYPE dats,
         lv_use_config_flag TYPE abap_bool,
         ls_config TYPE zscwm_mpn_config_st,
         lt_material_master TYPE lty_material_master_tt,
         lt_groups TYPE lty_group_internal_tt,
         lv_group_count TYPE i,
-        lv_error_flag TYPE abap_bool.
+        lv_error_flag TYPE abap_bool,
+        lv_return TYPE bapiret2,
+        lv_lgnum TYPE /scwm/lgnum,
+        lv_veh_num TYPE /scwm/de_veh_num,
+        lt_material_numbers TYPE TABLE OF matnr,
+        lt_divisions TYPE TABLE OF spart,
+        lt_plants TYPE TABLE OF werks_d,
+        ls_config_temp TYPE zscwm_mpn_config_st,
+        lv_current_date TYPE dats,
+        lt_matid_22 TYPE TABLE OF /sapapo/matid,
+        lt_matid_16 TYPE TABLE OF /scwm/de_matid,
+        ls_matid_22 TYPE /sapapo/matid,
+        ls_material_master TYPE lty_material_master,
+        ls_return TYPE bapiret2,
+        lt_criteria TYPE TABLE OF string,
+        ls_group TYPE lty_group_internal,
+        lv_group_key TYPE string,
+        lv_matnr TYPE matnr,
+        lv_warehouse TYPE /scwm/de_who,
+        lv_plant TYPE werks_d,
+        lv_division TYPE spart,
+        lv_index TYPE i,
+        ls_grouped_material TYPE zscwm_mpn_group_st,
+        lv_group_id TYPE char20,
+        lv_sequence TYPE i,
+        ls_summary TYPE zscwm_mpn_group_summary_st,
+        lt_docids TYPE /scwm/tt_rdocid,
+        lt_docnos TYPE TABLE OF /scdl/dl_docno,
+        lt_partners TYPE TABLE OF bu_partner,
+        lt_addrnumbers TYPE TABLE OF ad_addrnum,
+        lt_deliverynos TYPE TABLE OF vbeln_vl,
+        lt_lgnums TYPE TABLE OF /scwm/lgnum,
+        lv_veh_num_clean TYPE string,
+        lv_group_key_clean TYPE string,
+        lv_total_qty TYPE quan,
+        lv_total_qty_alt TYPE quan,
+        lv_count TYPE i,
+        ls_ordim_o TYPE zewm_ordim_o_st,
+        ls_proci_o TYPE zewm_db_proci_o1_st,
+        ls_proch_o TYPE zewm_db_proch_o_st,
+        ls_refdoc TYPE zewm_db_ref_doc_st,
+        ls_waveitm TYPE zewm_waveitm_st,
+        ls_but000 TYPE zewm_but000_st,
+        ls_but020 TYPE zewm_but020_st,
+        ls_adrc TYPE zewm_adrc_st,
+        ls_t005u TYPE t005u,
+        ls_plant TYPE /scwm/t300_md,
+        ls_lnumt TYPE /scwm/t300t,
+        ls_delv_st TYPE zlog_get_detail_st,
+        ls_mara TYPE /sapapo/mara,
+        ls_marc TYPE marc,
+        lt_mara TYPE TABLE OF /sapapo/mara,
+        lt_marc TYPE TABLE OF marc,
+        lv_matid_16 TYPE /scwm/de_matid,
+        lv_criteria TYPE string,
+        ls_material_master_temp TYPE lty_material_master,
+        lv_vlpla TYPE /scwm/ltap_vlpla,
+        lt_country_region TYPE TABLE OF ty_country_region,
+        ls_country_region TYPE ty_country_region.
+
+  TYPES: BEGIN OF ty_country_region,
+           country TYPE land1,
+           region TYPE regio,
+         END OF ty_country_region.
 
   *----------------------------------------------------------------------*
   * Initialize
@@ -510,11 +622,54 @@ FUNCTION z_scwm_mpn_group_materials.
   *----------------------------------------------------------------------*
   * Step 1: Validate Inputs
   *----------------------------------------------------------------------*
-  PERFORM validate_inputs USING iv_lgnum
-                                 iv_veh_num
-                                 it_ordim_o
-                        CHANGING lv_error_flag
-                                 et_return[].
+  CLEAR: lv_error_flag.
+
+  * Validate warehouse
+  SELECT SINGLE lgnum FROM /scwm/t300
+    INTO lv_lgnum
+    WHERE lgnum = iv_lgnum.
+  IF sy-subrc <> 0.
+    lv_error_flag = abap_true.
+    CLEAR lv_return.
+    lv_return-type = 'E'.
+    lv_return-id = 'ZSCWM_MPN'.
+    lv_return-number = '001'.
+    lv_return-message_v1 = iv_lgnum.
+    MESSAGE ID lv_return-id TYPE lv_return-type NUMBER lv_return-number
+      WITH lv_return-message_v1 INTO lv_return-message.
+    APPEND lv_return TO et_return.
+    RETURN.
+  ENDIF.
+
+  * Validate vehicle
+  SELECT SINGLE veh_num FROM /scwm/vehicle
+    INTO lv_veh_num
+    WHERE veh_num = iv_veh_num.
+  IF sy-subrc <> 0.
+    lv_error_flag = abap_true.
+    CLEAR lv_return.
+    lv_return-type = 'E'.
+    lv_return-id = 'ZSCWM_MPN'.
+    lv_return-number = '002'.
+    lv_return-message_v1 = iv_veh_num.
+    MESSAGE ID lv_return-id TYPE lv_return-type NUMBER lv_return-number
+      WITH lv_return-message_v1 INTO lv_return-message.
+    APPEND lv_return TO et_return.
+    RETURN.
+  ENDIF.
+
+  * Validate materials table
+  IF it_ordim_o[] IS INITIAL.
+    lv_error_flag = abap_true.
+    CLEAR lv_return.
+    lv_return-type = 'E'.
+    lv_return-id = 'ZSCWM_MPN'.
+    lv_return-number = '003'.
+    MESSAGE ID lv_return-id TYPE lv_return-type NUMBER lv_return-number
+      INTO lv_return-message.
+    APPEND lv_return TO et_return.
+    RETURN.
+  ENDIF.
 
   IF lv_error_flag = abap_true.
     RETURN.
@@ -523,64 +678,761 @@ FUNCTION z_scwm_mpn_group_materials.
   *----------------------------------------------------------------------*
   * Step 2: Get Configuration
   *----------------------------------------------------------------------*
+  CLEAR: ls_config, ev_config_id, ev_config_level, ev_grouping_criteria.
+  lv_current_date = lv_dispatch_date.
+
   IF lv_use_config_flag = abap_true.
-    PERFORM get_configuration USING iv_lgnum
-                                    it_ordim_o
-                                    it_db_proci_o
-                                    lv_dispatch_date
-                           CHANGING ls_config
-                                    ev_config_id
-                                    ev_config_level
-                                    ev_grouping_criteria
-                                    et_return[].
+    * Extract material numbers, divisions, plants from input
+    CLEAR: lt_material_numbers, lt_divisions, lt_plants.
+
+    * Extract material numbers from IT_DB_PROCI_O
+    IF it_db_proci_o[] IS NOT INITIAL.
+      LOOP AT it_db_proci_o INTO ls_proci_o.
+        IF ls_proci_o-productno IS NOT INITIAL.
+          APPEND ls_proci_o-productno TO lt_material_numbers.
+        ENDIF.
+      ENDLOOP.
+      SORT lt_material_numbers.
+      DELETE ADJACENT DUPLICATES FROM lt_material_numbers.
+    ENDIF.
+
+    * Extract divisions and plants from material master (will be read later)
+    * For now, we'll extract from IT_DB_PROCI_O if available
+    IF it_db_proci_o[] IS NOT INITIAL.
+      LOOP AT it_db_proci_o INTO ls_proci_o.
+        IF ls_proci_o-stock_owner IS NOT INITIAL.
+          APPEND ls_proci_o-stock_owner TO lt_plants.
+        ENDIF.
+      ENDLOOP.
+      SORT lt_plants.
+      DELETE ADJACENT DUPLICATES FROM lt_plants.
+    ENDIF.
+
+    * Try Material level
+    IF lt_material_numbers[] IS NOT INITIAL.
+      SELECT config_id config_level level_value grouping_criteria
+             effective_from_date effective_to_date is_active created_date
+        FROM zscwm_mpn_config
+        INTO CORRESPONDING FIELDS OF ls_config_temp
+        FOR ALL ENTRIES IN lt_material_numbers
+        WHERE config_level = 'MATERIAL'
+          AND level_value = lt_material_numbers-table_line
+          AND is_active = 'X'
+          AND effective_from_date <= lv_current_date
+          AND (effective_to_date >= lv_current_date OR effective_to_date IS INITIAL)
+        ORDER BY created_date DESCENDING
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ls_config = ls_config_temp.
+        ev_config_id = ls_config_temp-config_id.
+        ev_config_level = ls_config_temp-config_level.
+        ev_grouping_criteria = ls_config_temp-grouping_criteria.
+      ENDIF.
+    ENDIF.
+
+    * Try Division level (if material level not found)
+    IF ls_config IS INITIAL AND lt_divisions[] IS NOT INITIAL.
+      SELECT config_id config_level level_value grouping_criteria
+             effective_from_date effective_to_date is_active created_date
+        FROM zscwm_mpn_config
+        INTO CORRESPONDING FIELDS OF ls_config_temp
+        FOR ALL ENTRIES IN lt_divisions
+        WHERE config_level = 'DIVISION'
+          AND level_value = lt_divisions-table_line
+          AND is_active = 'X'
+          AND effective_from_date <= lv_current_date
+          AND (effective_to_date >= lv_current_date OR effective_to_date IS INITIAL)
+        ORDER BY created_date DESCENDING
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ls_config = ls_config_temp.
+        ev_config_id = ls_config_temp-config_id.
+        ev_config_level = ls_config_temp-config_level.
+        ev_grouping_criteria = ls_config_temp-grouping_criteria.
+      ENDIF.
+    ENDIF.
+
+    * Try Plant level (if division level not found)
+    IF ls_config IS INITIAL AND lt_plants[] IS NOT INITIAL.
+      SELECT config_id config_level level_value grouping_criteria
+             effective_from_date effective_to_date is_active created_date
+        FROM zscwm_mpn_config
+        INTO CORRESPONDING FIELDS OF ls_config_temp
+        FOR ALL ENTRIES IN lt_plants
+        WHERE config_level = 'PLANT'
+          AND level_value = lt_plants-table_line
+          AND is_active = 'X'
+          AND effective_from_date <= lv_current_date
+          AND (effective_to_date >= lv_current_date OR effective_to_date IS INITIAL)
+        ORDER BY created_date DESCENDING
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ls_config = ls_config_temp.
+        ev_config_id = ls_config_temp-config_id.
+        ev_config_level = ls_config_temp-config_level.
+        ev_grouping_criteria = ls_config_temp-grouping_criteria.
+      ENDIF.
+    ENDIF.
+
+    * Try Site level (if plant level not found)
+    IF ls_config IS INITIAL.
+      SELECT config_id config_level level_value grouping_criteria
+             effective_from_date effective_to_date is_active created_date
+        FROM zscwm_mpn_config
+        INTO CORRESPONDING FIELDS OF ls_config_temp
+        WHERE config_level = 'SITE'
+          AND level_value = iv_lgnum
+          AND is_active = 'X'
+          AND effective_from_date <= lv_current_date
+          AND (effective_to_date >= lv_current_date OR effective_to_date IS INITIAL)
+        ORDER BY created_date DESCENDING
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ls_config = ls_config_temp.
+        ev_config_id = ls_config_temp-config_id.
+        ev_config_level = ls_config_temp-config_level.
+        ev_grouping_criteria = ls_config_temp-grouping_criteria.
+      ENDIF.
+    ENDIF.
+
+    * Try Global level (if site level not found)
+    IF ls_config IS INITIAL.
+      SELECT config_id config_level level_value grouping_criteria
+             effective_from_date effective_to_date is_active created_date
+        FROM zscwm_mpn_config
+        INTO CORRESPONDING FIELDS OF ls_config_temp
+        WHERE config_level = 'GLOBAL'
+          AND is_active = 'X'
+          AND effective_from_date <= lv_current_date
+          AND (effective_to_date >= lv_current_date OR effective_to_date IS INITIAL)
+        ORDER BY created_date DESCENDING
+        UP TO 1 ROWS.
+      ENDSELECT.
+      IF sy-subrc = 0.
+        ls_config = ls_config_temp.
+        ev_config_id = ls_config_temp-config_id.
+        ev_config_level = ls_config_temp-config_level.
+        ev_grouping_criteria = ls_config_temp-grouping_criteria.
+      ENDIF.
+    ENDIF.
   ENDIF.
 
   *----------------------------------------------------------------------*
   * Step 3: Read Master Data
   *----------------------------------------------------------------------*
-  PERFORM read_master_data USING it_ordim_o
-                        CHANGING lt_material_master
-                                 et_return[].
+  CLEAR: lt_material_master[].
+
+  * Extract unique material GUIDs
+  CLEAR: lt_matid_16, lt_matid_22.
+  LOOP AT it_ordim_o INTO ls_ordim_o.
+    IF ls_ordim_o-matid IS NOT INITIAL.
+      APPEND ls_ordim_o-matid TO lt_matid_16.
+    ENDIF.
+  ENDLOOP.
+  SORT lt_matid_16.
+  DELETE ADJACENT DUPLICATES FROM lt_matid_16.
+
+  * Convert 16-byte GUIDs to 22-byte GUIDs
+  LOOP AT lt_matid_16 INTO lv_matid_16.
+    CLEAR ls_matid_22.
+    CALL FUNCTION '/SAPAPO/INC_CONVERT_GUIDS'
+      EXPORTING
+        iv_guid16 = lv_matid_16
+      IMPORTING
+        ev_guid22 = ls_matid_22
+      EXCEPTIONS
+        OTHERS    = 1.
+    IF sy-subrc = 0.
+      APPEND ls_matid_22 TO lt_matid_22.
+    ENDIF.
+  ENDLOOP.
+
+  * Read material master data
+  IF lt_matid_22[] IS NOT INITIAL.
+    CLEAR: lt_mara, lt_marc.
+    SELECT matid matnr FROM /sapapo/mara
+      INTO TABLE lt_mara
+      FOR ALL ENTRIES IN lt_matid_22
+      WHERE matid = lt_matid_22-table_line.
+
+    IF sy-subrc = 0.
+      * Read plant and division data
+      SELECT matnr werks spart FROM marc
+        INTO TABLE lt_marc
+        FOR ALL ENTRIES IN lt_mara
+        WHERE matnr = lt_mara-matnr.
+
+      * Build material master table
+      LOOP AT lt_mara INTO ls_mara.
+        CLEAR ls_material_master.
+        ls_material_master-matid = ls_mara-matid.
+        ls_material_master-matnr = ls_mara-matnr.
+        
+        READ TABLE lt_marc INTO ls_marc
+          WITH KEY matnr = ls_mara-matnr.
+        IF sy-subrc = 0.
+          ls_material_master-werks = ls_marc-werks.
+          ls_material_master-spart = ls_marc-spart.
+          * Also collect divisions and plants for config lookup
+          IF ls_marc-spart IS NOT INITIAL.
+            APPEND ls_marc-spart TO lt_divisions.
+          ENDIF.
+          IF ls_marc-werks IS NOT INITIAL.
+            APPEND ls_marc-werks TO lt_plants.
+          ENDIF.
+        ENDIF.
+        
+        APPEND ls_material_master TO lt_material_master.
+      ENDLOOP.
+      SORT lt_material_master BY matid.
+      SORT lt_divisions.
+      DELETE ADJACENT DUPLICATES FROM lt_divisions.
+      SORT lt_plants.
+      DELETE ADJACENT DUPLICATES FROM lt_plants.
+    ELSE.
+      * Log warning
+      CLEAR ls_return.
+      ls_return-type = 'W'.
+      ls_return-id = 'ZSCWM_MPN'.
+      ls_return-number = '008'.
+      MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+        INTO ls_return-message.
+      APPEND ls_return TO et_return.
+    ENDIF.
+  ENDIF.
 
   *----------------------------------------------------------------------*
-  * Step 4 & 5: Apply Grouping and Build Output
+  * Step 4: Apply Grouping Logic
   *----------------------------------------------------------------------*
+  CLEAR: lt_groups[], ev_group_count.
+
   IF ls_config IS NOT INITIAL AND lv_use_config_flag = abap_true.
-    PERFORM apply_grouping USING it_ordIM_o
-                                 it_db_proci_o
-                                 ls_config
-                                 lt_material_master
-                                 iv_veh_num
-                        CHANGING lt_groups
-                                 ev_group_count
-                                 et_return[].
-    
-    PERFORM build_output USING lt_groups
-                               iv_veh_num
-                      CHANGING et_grouped_materials[]
-                               ev_group_count.
+    * Parse grouping criteria
+    CLEAR: lt_criteria.
+    SPLIT ls_config-grouping_criteria AT ',' INTO TABLE lt_criteria.
+    IF lt_criteria[] IS INITIAL.
+      * Invalid configuration
+      CLEAR ls_return.
+      ls_return-type = 'E'.
+      ls_return-id = 'ZSCWM_MPN'.
+      ls_return-number = '004'.
+      ls_return-message_v1 = ls_config-config_id.
+      MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+        WITH ls_return-message_v1 INTO ls_return-message.
+      APPEND ls_return TO et_return.
+    ELSE.
+      * Loop through materials
+      CLEAR: lv_index.
+      LOOP AT it_ordim_o INTO ls_ordim_o.
+        CLEAR: lv_group_key, lv_matnr, lv_warehouse, lv_plant, lv_division.
+
+        * Get material number
+        READ TABLE lt_material_master INTO ls_material_master_temp
+          WITH KEY matid = ls_ordim_o-matid BINARY SEARCH.
+        IF sy-subrc = 0.
+          lv_matnr = ls_material_master_temp-matnr.
+          lv_plant = ls_material_master_temp-werks.
+          lv_division = ls_material_master_temp-spart.
+        ENDIF.
+
+        * Build group key based on criteria
+        LOOP AT lt_criteria INTO lv_criteria.
+          CASE lv_criteria.
+            WHEN 'WH'.  " Warehouse
+              * Extract warehouse from storage bin
+              lv_vlpla = ls_ordim_o-vlpla.
+              IF lv_vlpla IS NOT INITIAL.
+                * Extract first part before separator
+                SPLIT lv_vlpla AT '-' INTO lv_warehouse DATA(lv_rest).
+                IF lv_warehouse IS INITIAL.
+                  lv_warehouse = lv_vlpla(4).
+                ENDIF.
+              ENDIF.
+              IF lv_warehouse IS INITIAL.
+                lv_warehouse = 'UNKNOWN'.
+                CLEAR ls_return.
+                ls_return-type = 'W'.
+                ls_return-id = 'ZSCWM_MPN'.
+                ls_return-number = '005'.
+                ls_return-message_v1 = lv_matnr.
+                ls_return-message_v2 = 'Warehouse'.
+                MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+                  WITH ls_return-message_v1 ls_return-message_v2 INTO ls_return-message.
+                APPEND ls_return TO et_return.
+              ENDIF.
+              IF lv_group_key IS INITIAL.
+                lv_group_key = lv_warehouse.
+              ELSE.
+                CONCATENATE lv_group_key lv_warehouse INTO lv_group_key SEPARATED BY '-'.
+              ENDIF.
+
+            WHEN 'M'.   " Material
+              IF lv_matnr IS INITIAL.
+                lv_matnr = 'UNKNOWN'.
+                CLEAR ls_return.
+                ls_return-type = 'W'.
+                ls_return-id = 'ZSCWM_MPN'.
+                ls_return-number = '005'.
+                ls_return-message_v1 = ' '.
+                ls_return-message_v2 = 'Material'.
+                MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+                  WITH ls_return-message_v1 ls_return-message_v2 INTO ls_return-message.
+                APPEND ls_return TO et_return.
+              ENDIF.
+              IF lv_group_key IS INITIAL.
+                lv_group_key = lv_matnr.
+              ELSE.
+                CONCATENATE lv_group_key lv_matnr INTO lv_group_key SEPARATED BY '-'.
+              ENDIF.
+
+            WHEN 'PC'.  " Plant Code
+              IF lv_plant IS INITIAL.
+                * Try to get from IT_DB_PROCI_O
+                READ TABLE it_db_proci_o INTO ls_proci_o
+                  WITH KEY docid = ls_ordim_o-rdocid.
+                IF sy-subrc = 0.
+                  lv_plant = ls_proci_o-stock_owner.
+                ENDIF.
+              ENDIF.
+              IF lv_plant IS INITIAL.
+                lv_plant = 'UNKNOWN'.
+                CLEAR ls_return.
+                ls_return-type = 'W'.
+                ls_return-id = 'ZSCWM_MPN'.
+                ls_return-number = '005'.
+                ls_return-message_v1 = lv_matnr.
+                ls_return-message_v2 = 'Plant Code'.
+                MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+                  WITH ls_return-message_v1 ls_return-message_v2 INTO ls_return-message.
+                APPEND ls_return TO et_return.
+              ENDIF.
+              IF lv_group_key IS INITIAL.
+                lv_group_key = lv_plant.
+              ELSE.
+                CONCATENATE lv_group_key lv_plant INTO lv_group_key SEPARATED BY '-'.
+              ENDIF.
+
+            WHEN 'D'.   " Division
+              IF lv_division IS INITIAL.
+                lv_division = 'UNKNOWN'.
+                CLEAR ls_return.
+                ls_return-type = 'W'.
+                ls_return-id = 'ZSCWM_MPN'.
+                ls_return-number = '005'.
+                ls_return-message_v1 = lv_matnr.
+                ls_return-message_v2 = 'Division'.
+                MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+                  WITH ls_return-message_v1 ls_return-message_v2 INTO ls_return-message.
+                APPEND ls_return TO et_return.
+              ENDIF.
+              IF lv_group_key IS INITIAL.
+                lv_group_key = lv_division.
+              ELSE.
+                CONCATENATE lv_group_key lv_division INTO lv_group_key SEPARATED BY '-'.
+              ENDIF.
+          ENDCASE.
+        ENDLOOP.
+
+        * Assign material to group
+        READ TABLE lt_groups INTO ls_group
+          WITH KEY group_key = lv_group_key.
+        IF sy-subrc <> 0.
+          CLEAR ls_group.
+          ls_group-group_key = lv_group_key.
+          lv_index = lv_index + 1.
+          ls_group-group_index = lv_index.
+          APPEND ls_group TO lt_groups.
+        ENDIF.
+        APPEND ls_ordim_o TO ls_group-materials.
+        MODIFY lt_groups FROM ls_group.
+      ENDLOOP.
+
+      * Remove empty groups
+      DELETE lt_groups WHERE materials IS INITIAL.
+
+      * Validate groups created
+      IF lt_groups[] IS INITIAL.
+        CLEAR ls_return.
+        ls_return-type = 'E'.
+        ls_return-id = 'ZSCWM_MPN'.
+        ls_return-number = '006'.
+        MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+          INTO ls_return-message.
+        APPEND ls_return TO et_return.
+      ELSE.
+        ev_group_count = lines( lt_groups ).
+      ENDIF.
+    ENDIF.
+
+    *----------------------------------------------------------------------*
+    * Step 5: Build Output Structure
+    *----------------------------------------------------------------------*
+    IF lt_groups[] IS NOT INITIAL.
+      CLEAR: et_grouped_materials[], ev_group_count.
+      CLEAR: lv_sequence.
+
+      SORT lt_groups BY group_key.
+
+      LOOP AT lt_groups INTO ls_group.
+        CLEAR: ls_grouped_material, ls_summary,
+               lt_docids, lt_docnos, lt_partners, lt_addrnumbers,
+               lt_deliverynos, lt_lgnums.
+
+        lv_sequence = lv_sequence + 1.
+
+        * Generate group ID
+        CLEAR: lv_group_id, lv_veh_num_clean, lv_group_key_clean.
+        lv_veh_num_clean = iv_veh_num.
+        REPLACE ALL OCCURRENCES OF '-' IN lv_veh_num_clean WITH ''.
+        REPLACE ALL OCCURRENCES OF ' ' IN lv_veh_num_clean WITH ''.
+
+        lv_group_key_clean = ls_group-group_key.
+        REPLACE ALL OCCURRENCES OF '-' IN lv_group_key_clean WITH ''.
+        REPLACE ALL OCCURRENCES OF ' ' IN lv_group_key_clean WITH ''.
+
+        CONCATENATE lv_veh_num_clean lv_group_key_clean lv_sequence
+          INTO lv_group_id SEPARATED BY '-'.
+
+        * Limit to 20 characters
+        IF strlen( lv_group_id ) > 20.
+          lv_group_id = lv_group_id(20).
+        ENDIF.
+
+        * Extract document IDs from group materials
+        CLEAR: ls_ordim_o.
+        LOOP AT ls_group-materials INTO ls_ordim_o.
+          IF ls_ordim_o-rdocid IS NOT INITIAL.
+            APPEND ls_ordim_o-rdocid TO lt_docids.
+          ENDIF.
+          IF ls_ordim_o-lgnum IS NOT INITIAL.
+            APPEND ls_ordim_o-lgnum TO lt_lgnums.
+          ENDIF.
+        ENDLOOP.
+        SORT lt_docids.
+        DELETE ADJACENT DUPLICATES FROM lt_docids.
+        SORT lt_lgnums.
+        DELETE ADJACENT DUPLICATES FROM lt_lgnums.
+
+        * Filter IT_DB_PROCI_O by docid
+        IF it_db_proci_o[] IS NOT INITIAL AND lt_docids[] IS NOT INITIAL.
+          LOOP AT it_db_proci_o INTO ls_proci_o.
+            READ TABLE lt_docids TRANSPORTING NO FIELDS
+              WITH KEY table_line = ls_proci_o-docid BINARY SEARCH.
+            IF sy-subrc = 0.
+              APPEND ls_proci_o TO ls_grouped_material-it_db_proci_o.
+              IF ls_proci_o-docno IS NOT INITIAL.
+                APPEND ls_proci_o-docno TO lt_docnos.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+        SORT lt_docnos.
+        DELETE ADJACENT DUPLICATES FROM lt_docnos.
+
+        * Filter IT_DB_PROCH_O by docno
+        IF it_db_proch_o[] IS NOT INITIAL AND lt_docnos[] IS NOT INITIAL.
+          LOOP AT it_db_proch_o INTO ls_proch_o.
+            READ TABLE lt_docnos TRANSPORTING NO FIELDS
+              WITH KEY table_line = ls_proch_o-docno BINARY SEARCH.
+            IF sy-subrc = 0.
+              APPEND ls_proch_o TO ls_grouped_material-it_db_proch_o.
+              IF ls_proch_o-partnerto_id IS NOT INITIAL.
+                * Get partner from but000
+                IF it_but000[] IS NOT INITIAL.
+                  READ TABLE it_but000 INTO ls_but000
+                    WITH KEY partner_guid = ls_proch_o-partnerto_id BINARY SEARCH.
+                  IF sy-subrc = 0 AND ls_but000-partner IS NOT INITIAL.
+                    APPEND ls_but000-partner TO lt_partners.
+                  ENDIF.
+                ENDIF.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        * Filter IT_DB_REFDOC by docid
+        IF it_db_refdoc[] IS NOT INITIAL AND lt_docids[] IS NOT INITIAL.
+          LOOP AT it_db_refdoc INTO ls_refdoc.
+            READ TABLE lt_docids TRANSPORTING NO FIELDS
+              WITH KEY table_line = ls_refdoc-docid BINARY SEARCH.
+            IF sy-subrc = 0.
+              APPEND ls_refdoc TO ls_grouped_material-it_db_refdoc.
+              IF ls_refdoc-refdocno IS NOT INITIAL.
+                APPEND ls_refdoc-refdocno TO lt_deliverynos.
+              ENDIF.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        * Filter IT_IT_WAVEITM by rdocid
+        IF it_it_waveitm[] IS NOT INITIAL AND lt_docids[] IS NOT INITIAL.
+          LOOP AT it_it_waveitm INTO ls_waveitm.
+            READ TABLE lt_docids TRANSPORTING NO FIELDS
+              WITH KEY table_line = ls_waveitm-rdocid BINARY SEARCH.
+            IF sy-subrc = 0.
+              APPEND ls_waveitm TO ls_grouped_material-it_it_waveitm.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        * Filter IT_BUT000, IT_BUT020, IT_ADRC, IT_T005U by partner
+        SORT lt_partners.
+        DELETE ADJACENT DUPLICATES FROM lt_partners.
+        IF lt_partners[] IS NOT INITIAL.
+          IF it_but000[] IS NOT INITIAL.
+            LOOP AT it_but000 INTO ls_but000.
+              READ TABLE lt_partners TRANSPORTING NO FIELDS
+                WITH KEY table_line = ls_but000-partner BINARY SEARCH.
+              IF sy-subrc = 0.
+                APPEND ls_but000 TO ls_grouped_material-it_but000.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+
+          IF it_but020[] IS NOT INITIAL.
+            LOOP AT it_but020 INTO ls_but020.
+              READ TABLE lt_partners TRANSPORTING NO FIELDS
+                WITH KEY table_line = ls_but020-partner BINARY SEARCH.
+              IF sy-subrc = 0.
+                APPEND ls_but020 TO ls_grouped_material-it_but020.
+                IF ls_but020-addrnumber IS NOT INITIAL.
+                  APPEND ls_but020-addrnumber TO lt_addrnumbers.
+                ENDIF.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+
+          SORT lt_addrnumbers.
+          DELETE ADJACENT DUPLICATES FROM lt_addrnumbers.
+          IF lt_addrnumbers[] IS NOT INITIAL.
+            IF it_adrc[] IS NOT INITIAL.
+              LOOP AT it_adrc INTO ls_adrc.
+                READ TABLE lt_addrnumbers TRANSPORTING NO FIELDS
+                  WITH KEY table_line = ls_adrc-addrnumber BINARY SEARCH.
+                IF sy-subrc = 0.
+                  APPEND ls_adrc TO ls_grouped_material-it_adrc.
+                ENDIF.
+              ENDLOOP.
+            ENDIF.
+
+            * Filter IT_T005U by country/region from adrc
+            CLEAR: lt_country_region.
+            LOOP AT ls_grouped_material-it_adrc INTO ls_adrc.
+              IF ls_adrc-country IS NOT INITIAL AND ls_adrc-region IS NOT INITIAL.
+                APPEND VALUE #( country = ls_adrc-country region = ls_adrc-region )
+                  TO lt_country_region.
+              ENDIF.
+            ENDLOOP.
+            SORT lt_country_region BY country region.
+            DELETE ADJACENT DUPLICATES FROM lt_country_region.
+            IF lt_country_region[] IS NOT INITIAL AND it_t005u[] IS NOT INITIAL.
+              LOOP AT it_t005u INTO ls_t005u.
+                READ TABLE lt_country_region INTO ls_country_region
+                  WITH KEY country = ls_t005u-land1 region = ls_t005u-bland BINARY SEARCH.
+                IF sy-subrc = 0.
+                  APPEND ls_t005u TO ls_grouped_material-it_t005u.
+                ENDIF.
+              ENDLOOP.
+            ENDIF.
+          ENDIF.
+        ENDIF.
+
+        * Filter IT_PLANT, IT_LNUMT by lgnum
+        IF lt_lgnums[] IS NOT INITIAL.
+          IF it_plant[] IS NOT INITIAL.
+            LOOP AT it_plant INTO ls_plant.
+              READ TABLE lt_lgnums TRANSPORTING NO FIELDS
+                WITH KEY table_line = ls_plant-lgnum BINARY SEARCH.
+              IF sy-subrc = 0.
+                APPEND ls_plant TO ls_grouped_material-it_plant.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+
+          IF it_lnumt[] IS NOT INITIAL.
+            LOOP AT it_lnumt INTO ls_lnumt.
+              READ TABLE lt_lgnums TRANSPORTING NO FIELDS
+                WITH KEY table_line = ls_lnumt-lgnum BINARY SEARCH.
+              IF sy-subrc = 0.
+                APPEND ls_lnumt TO ls_grouped_material-it_lnumt.
+              ENDIF.
+            ENDLOOP.
+          ENDIF.
+        ENDIF.
+
+        * Filter IT_DELV_ST by deliveryno
+        SORT lt_deliverynos.
+        DELETE ADJACENT DUPLICATES FROM lt_deliverynos.
+        IF lt_deliverynos[] IS NOT INITIAL AND it_delv_st[] IS NOT INITIAL.
+          LOOP AT it_delv_st INTO ls_delv_st.
+            READ TABLE lt_deliverynos TRANSPORTING NO FIELDS
+              WITH KEY table_line = ls_delv_st-deliveryno BINARY SEARCH.
+            IF sy-subrc = 0.
+              APPEND ls_delv_st TO ls_grouped_material-it_delv_st.
+            ENDIF.
+          ENDLOOP.
+        ENDIF.
+
+        * Build structure
+        ls_grouped_material-group_id = lv_group_id.
+        ls_grouped_material-group_sequence = lv_sequence.
+        ls_grouped_material-group_criteria_value = ls_group-group_key.
+        ls_grouped_material-it_ordim_o = ls_group-materials.
+
+        * Calculate summary
+        CLEAR: ls_summary, lv_total_qty, lv_total_qty_alt, lv_count.
+        LOOP AT ls_group-materials INTO ls_ordim_o.
+          lv_count = lv_count + 1.
+          lv_total_qty = lv_total_qty + ls_ordim_o-vsolm.
+          lv_total_qty_alt = lv_total_qty_alt + ls_ordim_o-vsola.
+          
+          * Extract key values from first material
+          IF lv_count = 1.
+            ls_summary-warehouse_code = ls_ordim_o-lgnum.
+            READ TABLE lt_material_master INTO ls_material_master_temp
+              WITH KEY matid = ls_ordim_o-matid BINARY SEARCH.
+            IF sy-subrc = 0.
+              ls_summary-material_number = ls_material_master_temp-matnr.
+              ls_summary-plant_code = ls_material_master_temp-werks.
+              ls_summary-division_code = ls_material_master_temp-spart.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+
+        ls_summary-total_materials = lv_count.
+        ls_summary-total_quantity = lv_total_qty.
+        ls_summary-total_quantity_alt = lv_total_qty_alt.
+
+        ls_grouped_material-group_summary = ls_summary.
+
+        APPEND ls_grouped_material TO et_grouped_materials.
+      ENDLOOP.
+
+      ev_group_count = lines( et_grouped_materials ).
+    ENDIF.
+
   ELSE.
-    * Default behavior: single group
-    PERFORM create_default_group USING it_ordim_o
-                                      it_db_proci_o
-                                      iv_veh_num
-                             CHANGING et_grouped_materials[]
-                                      ev_group_count
-                                      ev_grouping_criteria.
+    *----------------------------------------------------------------------*
+    * Step 6: Default Behavior (No Configuration or Configuration Disabled)
+    *----------------------------------------------------------------------*
+    CLEAR: et_grouped_materials[], ev_group_count.
+    CLEAR: ls_grouped_material, ls_summary, lv_group_id.
+
+    * Generate default group ID
+    CONCATENATE iv_veh_num 'DEFAULT' '001' INTO lv_group_id SEPARATED BY '-'.
+
+    * Build structure - assign all data as-is (no filtering needed for default)
+    ls_grouped_material-group_id = lv_group_id.
+    ls_grouped_material-group_sequence = 1.
+    ls_grouped_material-group_criteria_value = 'DEFAULT'.
+    ls_grouped_material-group_criteria_desc = 'Default grouping (all materials)'.
+    ls_grouped_material-it_ordim_o = it_ordim_o.
+    IF it_db_proci_o[] IS NOT INITIAL.
+      ls_grouped_material-it_db_proci_o = it_db_proci_o.
+    ENDIF.
+    IF it_db_proch_o[] IS NOT INITIAL.
+      ls_grouped_material-it_db_proch_o = it_db_proch_o.
+    ENDIF.
+    IF it_db_refdoc[] IS NOT INITIAL.
+      ls_grouped_material-it_db_refdoc = it_db_refdoc.
+    ENDIF.
+    IF it_it_waveitm[] IS NOT INITIAL.
+      ls_grouped_material-it_it_waveitm = it_it_waveitm.
+    ENDIF.
+    IF it_but000[] IS NOT INITIAL.
+      ls_grouped_material-it_but000 = it_but000.
+    ENDIF.
+    IF it_but020[] IS NOT INITIAL.
+      ls_grouped_material-it_but020 = it_but020.
+    ENDIF.
+    IF it_adrc[] IS NOT INITIAL.
+      ls_grouped_material-it_adrc = it_adrc.
+    ENDIF.
+    IF it_t005u[] IS NOT INITIAL.
+      ls_grouped_material-it_t005u = it_t005u.
+    ENDIF.
+    IF it_plant[] IS NOT INITIAL.
+      ls_grouped_material-it_plant = it_plant.
+    ENDIF.
+    IF it_lnumt[] IS NOT INITIAL.
+      ls_grouped_material-it_lnumt = it_lnumt.
+    ENDIF.
+    IF it_delv_st[] IS NOT INITIAL.
+      ls_grouped_material-it_delv_st = it_delv_st.
+    ENDIF.
+
+    * Calculate summary
+    CLEAR: ls_summary, lv_total_qty, lv_total_qty_alt, lv_count.
+    LOOP AT it_ordim_o INTO ls_ordim_o.
+      lv_count = lv_count + 1.
+      lv_total_qty = lv_total_qty + ls_ordim_o-vsolm.
+      lv_total_qty_alt = lv_total_qty_alt + ls_ordim_o-vsola.
+      
+      IF lv_count = 1.
+        ls_summary-warehouse_code = ls_ordim_o-lgnum.
+        READ TABLE lt_material_master INTO ls_material_master_temp
+          WITH KEY matid = ls_ordim_o-matid BINARY SEARCH.
+        IF sy-subrc = 0.
+          ls_summary-material_number = ls_material_master_temp-matnr.
+          ls_summary-plant_code = ls_material_master_temp-werks.
+          ls_summary-division_code = ls_material_master_temp-spart.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    ls_summary-total_materials = lv_count.
+    ls_summary-total_quantity = lv_total_qty.
+    ls_summary-total_quantity_alt = lv_total_qty_alt.
+
+    ls_grouped_material-group_summary = ls_summary.
+
+    APPEND ls_grouped_material TO et_grouped_materials.
+
+    ev_group_count = 1.
+    ev_grouping_criteria = 'DEFAULT'.
   ENDIF.
 
   *----------------------------------------------------------------------*
   * Step 7: Finalize
   *----------------------------------------------------------------------*
-  PERFORM finalize USING ev_group_count
-                CHANGING et_return[].
+  IF ev_group_count > 0.
+    CLEAR ls_return.
+    ls_return-type = 'S'.
+    ls_return-id = 'ZSCWM_MPN'.
+    ls_return-number = '009'.
+    ls_return-message_v1 = ev_group_count.
+    MESSAGE ID ls_return-id TYPE ls_return-type NUMBER ls_return-number
+      WITH ls_return-message_v1 INTO ls_return-message.
+    APPEND ls_return TO et_return.
+  ENDIF.
 
 ENDFUNCTION.
 ```
 
-### 5.2 Form Routines
+### 5.2 Code Notes
 
-#### 5.2.1 VALIDATE_INPUTS
+**Note**: All code is implemented inline within the function module. No FORM routines (PERFORM statements) are used, making the code suitable for SAP ECC systems where inline code is preferred.
+
+The function module contains the following logical sections:
+1. **Input Validation**: Validates warehouse, vehicle, and materials table
+2. **Configuration Lookup**: Reads configuration from ZSCWM_MPN_CONFIG table using hierarchy
+3. **Master Data Reading**: Reads material master data (MARA, MARC) for grouping
+4. **Grouping Logic**: Applies grouping criteria and creates groups
+5. **Output Building**: Filters all related tables per group and builds output structure
+6. **Default Behavior**: Creates single group if no configuration found
+7. **Finalization**: Adds success message to return table
+
+All helper functions (like generate_group_id, calculate_group_summary, log_warning) are implemented inline where needed.
+
+---
+
+**Note**: The following FORM routine sections are kept for reference only. The actual implementation in Section 5.1 uses inline code without PERFORM statements, making it suitable for SAP ECC.
+
+#### 5.2.1 VALIDATE_INPUTS (Reference - Now Inline in Section 5.1)
 
 ```abap
 FORM validate_inputs USING iv_lgnum TYPE /scwm/lgnum
@@ -948,6 +1800,17 @@ ENDFORM.
 ```abap
 FORM build_output USING it_groups TYPE lty_group_internal_tt
                        iv_veh_num TYPE /scwm/de_veh_num
+                       it_db_proci_o TYPE zewm_db_proci_o1_tt
+                       it_db_proch_o TYPE zewm_db_proch_o_tt
+                       it_db_refdoc TYPE zewm_db_ref_doc_tt
+                       it_it_waveitm TYPE zewm_waveitm_tt
+                       it_but000 TYPE zewm_but000_tt
+                       it_but020 TYPE zewm_but020_tt
+                       it_adrc TYPE zewm_adrc_tt
+                       it_t005u TYPE t005u_t
+                       it_plant TYPE /scwm/t300_md_tt
+                       it_lnumt TYPE /scwm/t300t_tt
+                       it_delv_st TYPE zlog_get_detail_tt
               CHANGING et_grouped_materials TYPE zscwm_mpn_group_tt
                        ev_group_count TYPE i.
 
@@ -955,14 +1818,23 @@ FORM build_output USING it_groups TYPE lty_group_internal_tt
         ls_group TYPE lty_group_internal,
         lv_group_id TYPE char20,
         lv_sequence TYPE i,
-        ls_summary TYPE zscwm_mpn_group_summary_st.
+        ls_summary TYPE zscwm_mpn_group_summary_st,
+        lt_docids TYPE /scwm/tt_rdocid,
+        lt_docnos TYPE TABLE OF /scdl/dl_docno,
+        lt_partners TYPE TABLE OF bu_partner,
+        lt_addrnumbers TYPE TABLE OF ad_addrnum,
+        lt_deliverynos TYPE TABLE OF vbeln_vl,
+        lt_lgnums TYPE TABLE OF /scwm/lgnum.
 
   CLEAR: et_grouped_materials[], ev_group_count.
 
   SORT it_groups BY group_key.
 
   LOOP AT it_groups INTO ls_group.
-    CLEAR: ls_grouped_material, ls_summary.
+    CLEAR: ls_grouped_material, ls_summary,
+           lt_docids, lt_docnos, lt_partners, lt_addrnumbers,
+           lt_deliverynos, lt_lgnums.
+
     lv_sequence = lv_sequence + 1.
 
     * Generate group ID
@@ -971,16 +1843,138 @@ FORM build_output USING it_groups TYPE lty_group_internal_tt
                                     lv_sequence
                           CHANGING lv_group_id.
 
+    * Extract document IDs from group materials
+    LOOP AT ls_group-materials INTO DATA(ls_ordim_o).
+      IF ls_ordim_o-rdocid IS NOT INITIAL.
+        APPEND ls_ordim_o-rdocid TO lt_docids.
+      ENDIF.
+      IF ls_ordim_o-lgnum IS NOT INITIAL.
+        APPEND ls_ordim_o-lgnum TO lt_lgnums.
+      ENDIF.
+    ENDLOOP.
+    SORT lt_docids.
+    DELETE ADJACENT DUPLICATES FROM lt_docids.
+    SORT lt_lgnums.
+    DELETE ADJACENT DUPLICATES FROM lt_lgnums.
+
+    * Filter IT_DB_PROCI_O by docid
+    LOOP AT it_db_proci_o INTO DATA(ls_proci_o)
+      WHERE docid IN lt_docids.
+      APPEND ls_proci_o TO ls_grouped_material-it_db_proci_o.
+      IF ls_proci_o-docno IS NOT INITIAL.
+        APPEND ls_proci_o-docno TO lt_docnos.
+      ENDIF.
+    ENDLOOP.
+    SORT lt_docnos.
+    DELETE ADJACENT DUPLICATES FROM lt_docnos.
+
+    * Filter IT_DB_PROCH_O by docno
+    LOOP AT it_db_proch_o INTO DATA(ls_proch_o)
+      WHERE docno IN lt_docnos.
+      APPEND ls_proch_o TO ls_grouped_material-it_db_proch_o.
+      IF ls_proch_o-partnerto_id IS NOT INITIAL.
+        * Get partner from but000
+        READ TABLE it_but000 INTO DATA(ls_but000)
+          WITH KEY partner_guid = ls_proch_o-partnerto_id BINARY SEARCH.
+        IF sy-subrc = 0 AND ls_but000-partner IS NOT INITIAL.
+          APPEND ls_but000-partner TO lt_partners.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    * Filter IT_DB_REFDOC by docid
+    LOOP AT it_db_refdoc INTO DATA(ls_refdoc)
+      WHERE docid IN lt_docids.
+      APPEND ls_refdoc TO ls_grouped_material-it_db_refdoc.
+      IF ls_refdoc-refdocno IS NOT INITIAL.
+        APPEND ls_refdoc-refdocno TO lt_deliverynos.
+      ENDIF.
+    ENDLOOP.
+
+    * Filter IT_IT_WAVEITM by rdocid
+    LOOP AT it_it_waveitm INTO DATA(ls_waveitm)
+      WHERE rdocid IN lt_docids.
+      APPEND ls_waveitm TO ls_grouped_material-it_it_waveitm.
+    ENDLOOP.
+
+    * Filter IT_BUT000, IT_BUT020, IT_ADRC, IT_T005U by partner
+    SORT lt_partners.
+    DELETE ADJACENT DUPLICATES FROM lt_partners.
+    IF lt_partners[] IS NOT INITIAL.
+      LOOP AT it_but000 INTO ls_but000
+        WHERE partner IN lt_partners.
+        APPEND ls_but000 TO ls_grouped_material-it_but000.
+      ENDLOOP.
+
+      LOOP AT it_but020 INTO DATA(ls_but020)
+        WHERE partner IN lt_partners.
+        APPEND ls_but020 TO ls_grouped_material-it_but020.
+        IF ls_but020-addrnumber IS NOT INITIAL.
+          APPEND ls_but020-addrnumber TO lt_addrnumbers.
+        ENDIF.
+      ENDLOOP.
+
+      SORT lt_addrnumbers.
+      DELETE ADJACENT DUPLICATES FROM lt_addrnumbers.
+      IF lt_addrnumbers[] IS NOT INITIAL.
+        LOOP AT it_adrc INTO DATA(ls_adrc)
+          WHERE addrnumber IN lt_addrnumbers.
+          APPEND ls_adrc TO ls_grouped_material-it_adrc.
+        ENDLOOP.
+
+        * Filter IT_T005U by country/region from adrc
+        DATA: lt_country_region TYPE TABLE OF ty_country_region.
+        TYPES: BEGIN OF ty_country_region,
+                 country TYPE land1,
+                 region TYPE regio,
+               END OF ty_country_region.
+        LOOP AT ls_grouped_material-it_adrc INTO ls_adrc.
+          APPEND VALUE #( country = ls_adrc-country region = ls_adrc-region )
+            TO lt_country_region.
+        ENDLOOP.
+        SORT lt_country_region BY country region.
+        DELETE ADJACENT DUPLICATES FROM lt_country_region.
+        LOOP AT it_t005u INTO DATA(ls_t005u)
+          FOR ALL ENTRIES IN lt_country_region
+          WHERE land1 = lt_country_region-country
+            AND bland = lt_country_region-region.
+          APPEND ls_t005u TO ls_grouped_material-it_t005u.
+        ENDLOOP.
+      ENDIF.
+    ENDIF.
+
+    * Filter IT_PLANT, IT_LNUMT by lgnum
+    IF lt_lgnums[] IS NOT INITIAL.
+      LOOP AT it_plant INTO DATA(ls_plant)
+        WHERE lgnum IN lt_lgnums.
+        APPEND ls_plant TO ls_grouped_material-it_plant.
+      ENDLOOP.
+
+      LOOP AT it_lnumt INTO DATA(ls_lnumt)
+        WHERE lgnum IN lt_lgnums.
+        APPEND ls_lnumt TO ls_grouped_material-it_lnumt.
+      ENDLOOP.
+    ENDIF.
+
+    * Filter IT_DELV_ST by deliveryno
+    SORT lt_deliverynos.
+    DELETE ADJACENT DUPLICATES FROM lt_deliverynos.
+    IF lt_deliverynos[] IS NOT INITIAL.
+      LOOP AT it_delv_st INTO DATA(ls_delv_st)
+        WHERE deliveryno IN lt_deliverynos.
+        APPEND ls_delv_st TO ls_grouped_material-it_delv_st.
+      ENDLOOP.
+    ENDIF.
+
     * Build structure
     ls_grouped_material-group_id = lv_group_id.
     ls_grouped_material-group_sequence = lv_sequence.
     ls_grouped_material-group_criteria_value = ls_group-group_key.
     ls_grouped_material-it_ordim_o = ls_group-materials.
-    ls_grouped_material-it_db_proci_o = ls_group-product_info.
 
     * Calculate summary
     PERFORM calculate_group_summary USING ls_group-materials
-                                          ls_group-product_info
+                                          ls_grouped_material-it_db_proci_o
                                 CHANGING ls_summary.
 
     ls_grouped_material-group_summary = ls_summary.
@@ -998,6 +1992,16 @@ ENDFORM.
 ```abap
 FORM create_default_group USING it_ordim_o TYPE zewm_ordim_o_tt
                                it_db_proci_o TYPE zewm_db_proci_o1_tt
+                               it_db_proch_o TYPE zewm_db_proch_o_tt
+                               it_db_refdoc TYPE zewm_db_ref_doc_tt
+                               it_it_waveitm TYPE zewm_waveitm_tt
+                               it_but000 TYPE zewm_but000_tt
+                               it_but020 TYPE zewm_but020_tt
+                               it_adrc TYPE zewm_adrc_tt
+                               it_t005u TYPE t005u_t
+                               it_plant TYPE /scwm/t300_md_tt
+                               it_lnumt TYPE /scwm/t300t_tt
+                               it_delv_st TYPE zlog_get_detail_tt
                                iv_veh_num TYPE /scwm/de_veh_num
                       CHANGING et_grouped_materials TYPE zscwm_mpn_group_tt
                                ev_group_count TYPE i
@@ -1012,13 +2016,23 @@ FORM create_default_group USING it_ordim_o TYPE zewm_ordim_o_tt
   * Generate default group ID
   CONCATENATE iv_veh_num 'DEFAULT' '001' INTO lv_group_id SEPARATED BY '-'.
 
-  * Build structure
+  * Build structure - assign all data as-is (no filtering needed for default)
   ls_grouped_material-group_id = lv_group_id.
   ls_grouped_material-group_sequence = 1.
   ls_grouped_material-group_criteria_value = 'DEFAULT'.
   ls_grouped_material-group_criteria_desc = 'Default grouping (all materials)'.
   ls_grouped_material-it_ordim_o = it_ordim_o.
   ls_grouped_material-it_db_proci_o = it_db_proci_o.
+  ls_grouped_material-it_db_proch_o = it_db_proch_o.
+  ls_grouped_material-it_db_refdoc = it_db_refdoc.
+  ls_grouped_material-it_it_waveitm = it_it_waveitm.
+  ls_grouped_material-it_but000 = it_but000.
+  ls_grouped_material-it_but020 = it_but020.
+  ls_grouped_material-it_adrc = it_adrc.
+  ls_grouped_material-it_t005u = it_t005u.
+  ls_grouped_material-it_plant = it_plant.
+  ls_grouped_material-it_lnumt = it_lnumt.
+  ls_grouped_material-it_delv_st = it_delv_st.
 
   * Calculate summary
   PERFORM calculate_group_summary USING it_ordim_o
@@ -1265,7 +2279,246 @@ ENDFORM.
 
 ---
 
-## 10. Implementation Checklist
+## 10. Integration with Z_FIORI_SWM_OB_TRK_PRINT_MPN
+
+### 10.1 Integration Point
+
+**Location**: After line 1826 (after `gt_ordim_o_tt` is populated), before SmartForm call at line 1868
+
+**Insert Code**:
+
+```abap
+*----------------------------------------------------------------------*
+* Call grouping function module for configurable MPN grouping
+*----------------------------------------------------------------------*
+DATA: lt_grouped_materials TYPE zscwm_mpn_group_tt,
+      lv_group_count TYPE i,
+      lv_config_id TYPE char32,
+      lv_config_level TYPE char10,
+      lv_grouping_criteria TYPE char200,
+      lt_return_group TYPE bapiret2_t,
+      lw_return_group TYPE bapiret2,
+      lv_use_config TYPE abap_bool VALUE 'X',
+      lv_mpn_sequence TYPE i,
+      lw_group TYPE zscwm_mpn_group_st,
+      lt_otf_data_final TYPE tsfotf,
+      lv_xstring_temp TYPE xstring,
+      lv_filename_temp TYPE /bofu/field_name.
+
+* Check if configurable grouping is enabled
+* This can be controlled via customizing table or parameter
+IF lv_use_config = abap_true AND gt_ordim_o_tt IS NOT INITIAL.
+  
+  CALL FUNCTION 'Z_SCWM_MPN_GROUP_MATERIALS'
+    EXPORTING
+      iv_lgnum          = i_lgnum
+      iv_veh_num        = gw_veh_num
+      iv_report_no      = i_report_no
+      it_ordim_o        = gt_ordim_o_tt
+      it_db_proci_o     = gt_db_proci_o
+      it_db_proch_o     = gt_db_proch_o
+      it_db_refdoc      = gt_db_refdoc
+      it_it_waveitm     = gt_it_waveitm
+      it_but000         = gt_but000
+      it_but020         = gt_but020
+      it_adrc           = gt_adrc
+      it_t005u          = gt_t005u
+      it_plant          = gt_plant
+      it_lnumt          = gt_lnumt
+      it_delv_st        = gt_delv_st
+      iv_dispatch_date  = sy-datum
+      iv_use_config     = lv_use_config
+    IMPORTING
+      et_grouped_materials = lt_grouped_materials
+      ev_group_count       = lv_group_count
+      ev_config_id         = lv_config_id
+      ev_config_level      = lv_config_level
+      ev_grouping_criteria = lv_grouping_criteria
+      et_return            = lt_return_group
+    EXCEPTIONS
+      OTHERS               = 99.
+
+  IF sy-subrc = 0.
+    * Check for errors in grouping
+    READ TABLE lt_return_group INTO lw_return_group 
+      WITH KEY type = 'E'.
+    IF sy-subrc = 0.
+      * Error in grouping, use default behavior (single MPN)
+      APPEND LINES OF lt_return_group TO et_return.
+      CLEAR: lt_grouped_materials, lv_group_count.
+    ELSE.
+      * Grouping successful - check if multiple MPNs needed
+      APPEND LINES OF lt_return_group TO et_return.
+      
+      * If multiple groups, generate MPN for each group
+      IF lv_group_count > 1.
+        CLEAR lv_mpn_sequence.
+        CLEAR: e_xstring, e_filename.
+        
+        LOOP AT lt_grouped_materials INTO lw_group.
+          lv_mpn_sequence = lv_mpn_sequence + 1.
+          
+          * Prepare data for SmartForm from grouped data
+          gt_ordim_o_tt = lw_group-it_ordim_o.
+          gt_db_proci_o = lw_group-it_db_proci_o.
+          gt_db_proch_o = lw_group-it_db_proch_o.
+          gt_db_refdoc = lw_group-it_db_refdoc.
+          gt_it_waveitm = lw_group-it_it_waveitm.
+          gt_but000 = lw_group-it_but000.
+          gt_but020 = lw_group-it_but020.
+          gt_adrc = lw_group-it_adrc.
+          gt_t005u = lw_group-it_t005u.
+          gt_plant = lw_group-it_plant.
+          gt_lnumt = lw_group-it_lnumt.
+          gt_delv_st = lw_group-it_delv_st.
+          
+          * Update output filename with group identifier
+          CONCATENATE i_report_no lw_group-group_id 'pdf' 
+            INTO lv_filename_temp SEPARATED BY '.'.
+          
+          * Call SmartForm for this group
+          CALL FUNCTION gw_fm_name
+            EXPORTING
+              control_parameters = gw_control_parameters
+              output_options     = gw_output
+              user_settings      = gc_x
+              who                = i_lgnum
+              whohu              = gt_whohu
+              sr_act             = gw_tu_sr_act
+              gw_lnumt           = gw_lnumt
+              gw_but0001         = gw_but0001
+              gw_duct            = gw_duct
+              im_polyster_flag   = lw_polyster_flag
+            IMPORTING
+              job_output_info    = gt_otf_data_temp
+              gw_nlber           = gw_nlber
+            TABLES
+              gt_db_proci_o      = gt_db_proci_o
+              gt_db_proch_o      = gt_db_proch_o
+              gt_t005u           = gt_t005u
+              gt_adrc            = gt_adrc
+              gt_ordim_o         = gt_ordim_o_tt
+              gt_db_refdoc       = gt_db_refdoc
+              gt_it_waveitm      = gt_it_waveitm
+              gt_but000          = gt_but000
+              gt_but020          = gt_but020
+              gt_plant           = gt_plant
+              gt_lnumt           = gt_lnumt
+              gt_delv_st         = gt_delv_st
+            EXCEPTIONS
+              formatting_error   = 1
+              internal_error     = 2
+              send_error         = 3
+              user_canceled      = 4
+              OTHERS             = 5.
+
+          IF sy-subrc = 0 AND NOT gt_otf_data_temp-otfdata IS INITIAL.
+            * Convert OTF to PDF
+            CALL FUNCTION 'CONVERT_OTF'
+              EXPORTING
+                format = 'PDF'
+              IMPORTING
+                bin_file = lv_xstring_temp
+              TABLES
+                otf = gt_otf_data_temp-otfdata
+                lines = gt_lines
+              EXCEPTIONS
+                OTHERS = 5.
+
+            IF sy-subrc = 0.
+              * Combine PDFs or handle multiple files
+              * For now, use last group's PDF (or implement PDF merge)
+              e_xstring = lv_xstring_temp.
+              e_filename = lv_filename_temp.
+              
+              * Option: Append to combined PDF or return multiple files
+              * This depends on business requirement
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+        
+        * Set final output
+        e_mimetype = 'application/pdf'.
+        
+        * Exit after processing all groups
+        RETURN.
+      ELSE.
+        * Single group - continue with existing logic below
+        * Data already filtered in lw_group, use it
+        gt_ordim_o_tt = lw_group-it_ordim_o.
+        gt_db_proci_o = lw_group-it_db_proci_o.
+        gt_db_proch_o = lw_group-it_db_proch_o.
+        gt_db_refdoc = lw_group-it_db_refdoc.
+        gt_it_waveitm = lw_group-it_it_waveitm.
+        gt_but000 = lw_group-it_but000.
+        gt_but020 = lw_group-it_but020.
+        gt_adrc = lw_group-it_adrc.
+        gt_t005u = lw_group-it_t005u.
+        gt_plant = lw_group-it_plant.
+        gt_lnumt = lw_group-it_lnumt.
+        gt_delv_st = lw_group-it_delv_st.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+ENDIF.
+
+* If no configuration or grouping failed, continue with existing logic
+* (Default: single MPN per vehicle - existing code continues from line 1828)
+```
+
+### 10.2 Multiple MPN Handling Options
+
+**Option 1: Return Last Group's PDF** (Current implementation)
+- Simple approach
+- Returns PDF for last group only
+- Suitable if only one MPN is needed at a time
+
+**Option 2: Combine Multiple PDFs**
+- Merge all group PDFs into single document
+- Requires PDF merge functionality
+- Returns one combined PDF
+
+**Option 3: Return Multiple Files**
+- Modify function to return table of PDFs
+- Each group has separate PDF
+- Requires calling program to handle multiple files
+
+**Recommendation**: Start with Option 1, enhance to Option 2 if business requires combined PDF.
+
+### 10.3 Data Flow
+
+```
+Z_FIORI_SWM_OB_TRK_PRINT_MPN
+    │
+    ├─> Collects materials (gt_ordim_o_tt)
+    ├─> Collects related data (gt_db_proci_o, gt_db_proch_o, etc.)
+    │
+    ├─> Calls Z_SCWM_MPN_GROUP_MATERIALS
+    │   │
+    │   ├─> Groups materials based on configuration
+    │   ├─> Filters all related tables per group
+    │   └─> Returns ET_GROUPED_MATERIALS (one entry per group)
+    │
+    └─> Loop through groups
+        │
+        ├─> For each group:
+        │   ├─> Assign filtered data to SmartForm tables
+        │   ├─> Call SmartForm
+        │   └─> Generate PDF
+        │
+        └─> Return final PDF(s)
+```
+
+### 10.4 Key Points
+
+1. **Multiple Print Indicator**: `EV_GROUP_COUNT > 1` indicates multiple MPNs needed
+2. **Complete Data per Group**: Each group contains all filtered data needed for SmartForm
+3. **Backward Compatibility**: If grouping fails or returns single group, existing logic continues
+4. **Error Handling**: All errors from grouping function are appended to `ET_RETURN`
+
+---
+
+## 11. Implementation Checklist
 
 ### 10.1 Pre-Implementation
 
@@ -1318,7 +2571,7 @@ ENDFORM.
 
 ---
 
-## 11. Code Review Checklist
+## 12. Code Review Checklist
 
 ### 11.1 Code Quality
 
@@ -1351,7 +2604,7 @@ ENDFORM.
 
 ---
 
-## 12. Deployment Plan
+## 13. Deployment Plan
 
 ### 12.1 Development System
 
@@ -1376,7 +2629,7 @@ ENDFORM.
 
 ---
 
-## 13. Maintenance Considerations
+## 14. Maintenance Considerations
 
 ### 13.1 Configuration Management
 
@@ -1398,7 +2651,7 @@ ENDFORM.
 
 ---
 
-## 14. Appendix
+## 15. Appendix
 
 ### 14.1 Constants
 
@@ -1419,9 +2672,11 @@ CONSTANTS: gc_config_level_material TYPE char10 VALUE 'MATERIAL',
            gc_separator               TYPE char1  VALUE '-'.
 ```
 
-### 14.2 Helper Functions
+### 14.2 Helper Functions (All Implemented Inline)
 
-#### GET_WAREHOUSE_FROM_STORAGE_BIN
+**Note**: All helper functions are implemented inline within the main function module code (Section 5.1). No separate FORM routines are used.
+
+#### GET_WAREHOUSE_FROM_STORAGE_BIN (Inline Implementation)
 
 ```abap
 FORM get_warehouse_from_storage_bin USING iv_vlpla TYPE /scwm/ltap_vlpla
@@ -1445,7 +2700,7 @@ FORM get_warehouse_from_storage_bin USING iv_vlpla TYPE /scwm/ltap_vlpla
 ENDFORM.
 ```
 
-#### LOG_WARNING
+#### LOG_WARNING (Inline Implementation)
 
 ```abap
 FORM log_warning USING iv_matnr TYPE matnr
@@ -1470,7 +2725,7 @@ FORM log_warning USING iv_matnr TYPE matnr
 ENDFORM.
 ```
 
-#### CALCULATE_GROUP_SUMMARY
+#### CALCULATE_GROUP_SUMMARY (Inline Implementation)
 
 ```abap
 FORM calculate_group_summary USING it_ordim_o TYPE zewm_ordim_o_tt
